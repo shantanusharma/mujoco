@@ -137,6 +137,7 @@
       <xs:enumeration value="RK4"/>
       <xs:enumeration value="implicit"/>
       <xs:enumeration value="implicitfast"/>
+      <xs:enumeration value="discrete"/>
     </xs:restriction>
   </xs:simpleType>
 
@@ -3770,6 +3771,7 @@
     <xs:attribute name="interp" type="kw_interp"/>
     <xs:attribute name="delay" type="xs:double"/>
     <xs:attribute name="interval" type="double1to2"/>
+    <xs:attribute name="cutoff" type="xs:double"/>
     <xs:attribute name="user" type="doublelist"/>
   </xs:complexType>
 

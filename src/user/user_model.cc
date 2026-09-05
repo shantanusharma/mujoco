@@ -479,6 +479,9 @@ mjCModel& mjCModel::operator+=(const mjCModel& other) {
   // update pointers to local elements
   PointToLocal();
 
+  // reprocess lists to ensure ordering matches compiled model after attach
+  ProcessLists(/*checkrepeat=*/false);
+
   // update signature after we updated the tree lists and we updated the pointers
   spec.element->signature = Signature();
   return *this;
@@ -3538,6 +3541,14 @@ void mjCModel::CopyObjects(mjModel* m) {
 
     // set interpolation type: positive = volumetric, negative = shell mode
     m->flex_interp[i] = pfl->spec.elastic2d ? -pfl->spec.order : pfl->spec.order;
+
+    if (m->flex_passive[i] && (m->flex_rigid[i] || m->flex_interp[i] || m->flex_dim[i] < 2)) {
+      AddWarning("flex '" +
+                     pfl->name +
+                     "' has passive contact, which is not supported for rigid, "
+                     "interpolated or 1D flexes: attribute ignored",
+                 pfl);
+    }
 
     // set cell count for multi-cell finite cell method
     m->flex_cellnum[3 * i + 0] = pfl->spec.cellcount[0];
