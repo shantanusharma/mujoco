@@ -2577,7 +2577,25 @@ void mjCBody::Compile(void) {
 
   // process orientation alternatives for inertia
   if (mjuu_defined(fullinertia[0])) {
-    const char* err = mjuu_fullInertia(iquat, inertia, this->fullinertia);
+    // rotate tensor from inertial frame to body frame
+    double mat[9], full[9], full_body[9], fullinertia_body[6];
+    mjuu_quat2mat(mat, iquat);
+    full[0] = this->fullinertia[0];
+    full[4] = this->fullinertia[1];
+    full[8] = this->fullinertia[2];
+    full[1] = full[3] = this->fullinertia[3];
+    full[2] = full[6] = this->fullinertia[4];
+    full[5] = full[7] = this->fullinertia[5];
+    mjuu_mulRMRT(full_body, mat, full);
+    fullinertia_body[0] = full_body[0];
+    fullinertia_body[1] = full_body[4];
+    fullinertia_body[2] = full_body[8];
+    fullinertia_body[3] = full_body[1];
+    fullinertia_body[4] = full_body[2];
+    fullinertia_body[5] = full_body[5];
+
+    // decompose rotated tensor into principal axes
+    const char* err = mjuu_fullInertia(iquat, inertia, fullinertia_body);
     if (err) { throw mjCError(this, "error '%s' in fullinertia", err); }
   }
 
@@ -5702,7 +5720,7 @@ void mjCPair::ResolveReferences(const mjCModel* m) {
   }
 
   // get geom ids and body signature
-  signature = ((geom1->body->id) << 16) + geom2->body->id;
+  signature = ((unsigned int)(geom1->body->id) << 16) + geom2->body->id;
 }
 
 
@@ -5905,7 +5923,7 @@ void mjCBodyPair::ResolveReferences(const mjCModel* m) {
   // get body ids and body signature
   body1     = pb1->id;
   body2     = pb2->id;
-  signature = (body1 << 16) + body2;
+  signature = ((unsigned int)body1 << 16) + body2;
 }
 
 

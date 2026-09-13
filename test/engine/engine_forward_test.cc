@@ -821,6 +821,45 @@ TEST_F(ForwardTest, DegenerateInertia) {
   }
 }
 
+// a singular modified inertia M - h*qDeriv is a warning under both implicit
+// integrators: implicitfast clamps the LDL pivot, implicit clamps the LU pivot
+TEST_F(ForwardTest, SingularModifiedInertiaWarns) {
+  mock_warning_handler.ExpectWarnings(
+      "Inertia matrix is too close to singular");
+
+  // the affine velocity gain of 1 makes M - h*qDeriv exactly singular at h=1,
+  // once a unit control brings the early activation to 1
+  static constexpr char xml[] = R"(
+  <mujoco>
+    <option timestep="1" integrator="implicit"/>
+    <worldbody>
+      <body>
+        <joint name="slide" type="slide"/>
+        <geom type="sphere" size="0.1" mass="1"/>
+      </body>
+    </worldbody>
+    <actuator>
+      <general joint="slide" dyntype="integrator" gaintype="affine" gainprm="1 0 1"
+               actearly="true"/>
+    </actuator>
+  </mujoco>
+  )";
+  char error[1024];
+  MjModelPtr model = LoadModelFromString(xml, error, sizeof(error));
+  ASSERT_THAT(model.get(), NotNull()) << error;
+  MjDataPtr data = MakeData(model);
+
+  for (int integrator : {mjINT_IMPLICIT, mjINT_IMPLICITFAST}) {
+    model->opt.integrator = integrator;
+    mj_resetData(model.get(), data.get());
+    data->ctrl[0] = 1;
+    mj_step(model.get(), data.get());
+    EXPECT_EQ(data->warning[mjWARN_INERTIA].number, 1) << integrator;
+    EXPECT_EQ(data->warning[mjWARN_INERTIA].lastinfo, 0);
+    EXPECT_TRUE(std::isfinite(data->qvel[0]));
+  }
+}
+
 TEST_F(ForwardTest, ControlClamping) {
   static constexpr char xml[] = R"(
   <mujoco>
@@ -3813,6 +3852,57 @@ TEST_F(ImplicitIntegratorTest, PassiveFlexContactInMetric) {
   EXPECT_GT(lo[1], lo[0] - 0.01)
       << "upper sheet passed through: lowest z " << lo[1]
       << " against the lower sheet's " << lo[0];
+}
+
+// A dense Jacobian gets no chain from mj_contactJacobian: it returns every dof
+// in order and leaves the chain untouched, so the published rows are compacted
+// on their nonzeros instead. Reading the chain regardless indexed uninitialized
+// memory and crashed in the velocity shift.
+TEST_F(ImplicitIntegratorTest, PassiveFlexContactDenseJacobian) {
+  static constexpr char xml[] = R"(
+  <mujoco>
+    <option timestep="0.002" integrator="discrete" solver="CG" iterations="400"
+            jacobian="dense"/>
+    <worldbody>
+      <flexcomp name="lower" type="grid" dim="2" count="9 9 1" spacing=".04 .04 1"
+                radius=".004" mass=".3" pos="0 0 .2">
+        <contact selfcollide="auto" passive="true"/>
+        <elasticity young="1e5" poisson=".2" thickness="2e-3" elastic2d="both" damping="1e-4"/>
+        <pin id="0 8 72 80"/>
+      </flexcomp>
+      <flexcomp name="upper" type="grid" dim="2" count="5 5 1" spacing=".04 .04 1"
+                radius=".004" mass=".1" pos="0 0 .27">
+        <contact selfcollide="auto" passive="true"/>
+        <elasticity young="1e5" poisson=".2" thickness="2e-3" elastic2d="both" damping="1e-4"/>
+      </flexcomp>
+    </worldbody>
+  </mujoco>
+  )";
+  char error[1024];
+  MjModelPtr m = LoadModelFromString(xml, error, sizeof(error));
+  ASSERT_THAT(m, NotNull()) << error;
+  MjDataPtr d = MakeData(m);
+  const mjModel* model = m.get();
+  mjData* data = d.get();
+  ASSERT_FALSE(mj_isSparse(model)) << "the scene must exercise the dense path";
+
+  for (int i = 0; i < 300; i++) {
+    mj_step(model, data);
+    ASSERT_FALSE(data->warning[mjWARN_BADQACC].number)
+        << "diverged at step " << i;
+    // every published column index addresses a real dof
+    for (int adr = 0; adr < data->nefmcon;) {
+      int nnz = data->efm_con_ind[adr];
+      ASSERT_GE(nnz, 0);
+      ASSERT_LE(adr + 2 + nnz, data->nefmcon);
+      for (int j = 0; j < nnz; j++) {
+        int c = data->efm_con_ind[adr + 2 + j];
+        ASSERT_GE(c, 0);
+        ASSERT_LT(c, model->nv);
+      }
+      adr += 2 + nnz;
+    }
+  }
 }
 
 // The contact rows carry the full Jacobian chain: with the lower sheet pinned
