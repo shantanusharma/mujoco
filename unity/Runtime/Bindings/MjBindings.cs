@@ -118,7 +118,7 @@ public const int mjMAXLINEPNT = 1001;
 public const int mjMAXPLANEGRID = 200;
 public const bool THIRD_PARTY_MUJOCO_MJXMACRO_H_ = true;
 public const bool THIRD_PARTY_MUJOCO_MUJOCO_H_ = true;
-public const int mjVERSION_HEADER = 3013001;
+public const int mjVERSION_HEADER = 3014001;
 
 
 // ------------------------------------Enums------------------------------------
@@ -7062,7 +7062,7 @@ public static unsafe extern void mj_setState(mjModel_* m, mjData_* d, double* st
 public static unsafe extern void mj_copyState(mjModel_* m, mjData_* src, mjData_* dst, int sig);
 
 [DllImport("mujoco", CallingConvention = CallingConvention.Cdecl)]
-public static unsafe extern double mj_readCtrl(mjModel_* m, mjData_* d, int id, double time, int interp);
+public static unsafe extern double* mj_readCtrl(mjModel_* m, mjData_* d, int id, double time, double* result, int interp);
 
 [DllImport("mujoco", CallingConvention = CallingConvention.Cdecl)]
 public static unsafe extern double* mj_readSensor(mjModel_* m, mjData_* d, int id, double time, double* result, int interp);

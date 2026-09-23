@@ -1577,23 +1577,23 @@ void mjd_flexBend_mul(const mjModel* m, mjData* d, mjtNum* res, const mjtNum* ve
         continue;
       }
 
-      // apply 4x4 bending stencil, coordinate-wise. Pinned vertices (zero-dof bodies) contribute
-      // nothing, as in mjd_flexStretch_mul: they have no dof to write a row into and none to read a
-      // displacement from, and body_dofadr is negative there, so an unguarded index runs off both
-      // res and vec.
+      // apply 4x4 bending stencil, coordinate-wise. Pinned vertices (bodies without
+      // exactly 3 dofs) contribute nothing, as in mjd_flexStretch_mul: they have no
+      // dof to write a row into and none to read a displacement from, and body_dofadr
+      // is negative there, so an unguarded index runs off both res and vec.
       // The stencil is built from WORLD-space vertex positions while the slide dofs live in each
       // vertex body's own (possibly rotated) frame, so the operator is sandwiched with R (dof ->
       // world) and R^T (world -> dof), as mjd_flexStretch_mul does. Without it the operator is not
       // the Jacobian of mj_flexPassiveBend's force whenever a flex parent is rotated.
       for (int i = 0; i < 4; i++) {
         int bi = bodyid[v[i]];
-        if (!m->body_dofnum[bi]) {
+        if (m->body_dofnum[bi] != 3) {
           continue;
         }
         mjtNum vw[3] = {0, 0, 0};
         for (int j = 0; j < 4; j++) {
           int bj = bodyid[v[j]];
-          if (!m->body_dofnum[bj]) {
+          if (m->body_dofnum[bj] != 3) {
             continue;
           }
           mjtNum wj[3];
@@ -1628,7 +1628,7 @@ static const int stretch_edges[2][6][2] = {
 // d_a the current edge vector and Me_a = sum_b M_ab e_b the edge tension. The first (Gauss-Newton)
 // term alone is not the Jacobian of the force: without the second (geometric) term the operator is
 // only first-order correct, which shows up directly as finite-difference error against
-// -d(qfrc_passive)/dq. Pinned vertices (zero-dof bodies) contribute nothing.
+// -d(qfrc_passive)/dq. Pinned vertices (bodies without exactly 3 dofs) contribute nothing.
 void mjd_flexStretch_mul(const mjModel* m, mjData* d, mjtNum* res, const mjtNum* vec,
                          mjtNum s1, mjtNum s2) {
   for (int f = 0; f < m->nflex; f++) {
@@ -1675,10 +1675,10 @@ void mjd_flexStretch_mul(const mjModel* m, mjData* d, mjtNum* res, const mjtNum*
         // with R (dof -> world) and R^T (world -> dof); mj_flexPassiveStretch applies the same R^T
         // to its world-space force. R = I for the common case of an unrotated parent body.
         mjtNum w0[3] = {0}, w1[3] = {0};
-        if (m->body_dofnum[b0]) {
+        if (m->body_dofnum[b0] == 3) {
           mji_mulMatVec3(w0, d->xmat + 9*b0, vec + m->body_dofadr[b0]);
         }
-        if (m->body_dofnum[b1]) {
+        if (m->body_dofnum[b1] == 3) {
           mji_mulMatVec3(w1, d->xmat + 9*b1, vec + m->body_dofadr[b1]);
         }
         for (int x = 0; x < 3; x++) {
@@ -1728,13 +1728,13 @@ void mjd_flexStretch_mul(const mjModel* m, mjData* d, mjtNum* res, const mjtNum*
         for (int x = 0; x < 3; x++) {
           rw[x] = coef*dvec[e][x] + scale*Me[e]*dw[e][x];
         }
-        if (m->body_dofnum[b0]) {   // world -> dof frame
+        if (m->body_dofnum[b0] == 3) {   // world -> dof frame
           mji_mulMatTVec3(rl, d->xmat + 9*b0, rw);
           for (int x = 0; x < 3; x++) {
             res[m->body_dofadr[b0]+x] += rl[x];
           }
         }
-        if (m->body_dofnum[b1]) {
+        if (m->body_dofnum[b1] == 3) {
           mji_mulMatTVec3(rl, d->xmat + 9*b1, rw);
           for (int x = 0; x < 3; x++) {
             res[m->body_dofadr[b1]+x] -= rl[x];
@@ -1924,11 +1924,10 @@ int mjd_flexStiff_assemble(const mjModel* m, mjData* d, int* rownnz, int* rowadr
   int nv = m->nv;
   mj_markStack(d);
 
-  // collect participating vertices: global flex vertex id -> local slot, dofadr
-  int nvert = 0;
-  int* vslot = mjSTACKALLOC(d, m->nflexvert > 0 ? m->nflexvert : 1, int);
-  for (int i = 0; i < m->nflexvert; i++) {
-    vslot[i] = -1;
+  // collect participating bodies: bodies with 3 dofs get one slot each
+  int* bodyslot = mjSTACKALLOC(d, m->nbody, int);
+  for (int b = 0; b < m->nbody; b++) {
+    bodyslot[b] = -1;
   }
   for (int f = 0; f < m->nflex; f++) {
     // contact no longer forces vertex slots: a contact-only flex rides the rank-1 class
@@ -1937,17 +1936,14 @@ int mjd_flexStiff_assemble(const mjModel* m, mjData* d, int* rownnz, int* rowadr
     }
     for (int lv = 0; lv < m->flex_vertnum[f]; lv++) {
       int gv = m->flex_vertadr[f] + lv;
-      if (m->body_dofnum[m->flex_vertbodyid[gv]] == 3) {
-        vslot[gv] = nvert++;
+      int b = m->flex_vertbodyid[gv];
+      if (m->body_dofnum[b] == 3) {
+        bodyslot[b] = 1;
       }
     }
   }
 
   // interp nodes participate when the caller supplies the K_rot cache (centered fast path)
-  int* nslot = mjSTACKALLOC(d, m->nflexnode > 0 ? (int)m->nflexnode : 1, int);
-  for (int i = 0; i < m->nflexnode; i++) {
-    nslot[i] = -1;
-  }
   if (Krot) {
     for (int f = 0; f < m->nflex; f++) {
       if (!flexInterp_processed(m, f)) {
@@ -1955,11 +1951,31 @@ int mjd_flexStiff_assemble(const mjModel* m, mjData* d, int* rownnz, int* rowadr
       }
       const int* bodyid = m->flex_nodebodyid + m->flex_nodeadr[f];
       for (int ln = 0; ln < m->flex_nodenum[f]; ln++) {
-        if (m->body_dofnum[bodyid[ln]] == 3) {
-          nslot[m->flex_nodeadr[f] + ln] = nvert++;
+        int b = bodyid[ln];
+        if (m->body_dofnum[b] == 3) {
+          bodyslot[b] = 1;
         }
       }
     }
+  }
+
+  int nvert = 0;
+  for (int b = 0; b < m->nbody; b++) {
+    if (bodyslot[b] > 0) {
+      bodyslot[b] = nvert++;
+    }
+  }
+
+  int* vslot = mjSTACKALLOC(d, m->nflexvert > 0 ? m->nflexvert : 1, int);
+  for (int i = 0; i < m->nflexvert; i++) {
+    int b = m->flex_vertbodyid[i];
+    vslot[i] = (b >= 0) ? bodyslot[b] : -1;
+  }
+
+  int* nslot = mjSTACKALLOC(d, m->nflexnode > 0 ? (int)m->nflexnode : 1, int);
+  for (int i = 0; i < m->nflexnode; i++) {
+    int b = m->flex_nodebodyid[i];
+    nslot[i] = (b >= 0) ? bodyslot[b] : -1;
   }
 
   if (!nvert) {
@@ -1969,14 +1985,9 @@ int mjd_flexStiff_assemble(const mjModel* m, mjData* d, int* rownnz, int* rowadr
     return 0;
   }
   int* vdof = mjSTACKALLOC(d, nvert, int);
-  for (int gv = 0; gv < m->nflexvert; gv++) {
-    if (vslot[gv] >= 0) {
-      vdof[vslot[gv]] = m->body_dofadr[m->flex_vertbodyid[gv]];
-    }
-  }
-  for (int gn = 0; gn < m->nflexnode; gn++) {
-    if (nslot[gn] >= 0) {
-      vdof[nslot[gn]] = m->body_dofadr[m->flex_nodebodyid[gn]];
+  for (int b = 0; b < m->nbody; b++) {
+    if (bodyslot[b] >= 0) {
+      vdof[bodyslot[b]] = m->body_dofadr[b];
     }
   }
 
@@ -2404,16 +2415,17 @@ static int actuatorDerivSkip(const mjModel* m, const mjData* d, int i, int sleep
 // input of actuator i: ctrl, or (next-)activation
 static mjtNum actuatorInput(const mjModel* m, const mjData* d, int i) {
   if (m->actuator_dyntype[i] == mjDYN_NONE) {
-    // mirror mj_fwdActuation's input extraction: delayed controls read from the history
-    // buffer, and the control is clamped to ctrlrange
+    int adr = m->actuator_ctrladr[i];
     mjtNum ctrl;
     if (m->actuator_delay[i]) {
-      ctrl = mj_readCtrl(m, d, i, d->time, m->actuator_history[2*i+1]);
+      mjtNum ctrl_buf[4] = {0};
+      const mjtNum* ptr = mj_readCtrl(m, d, i, d->time, ctrl_buf, -1);
+      ctrl = ptr ? ptr[0] : ctrl_buf[0];
     } else {
-      ctrl = d->ctrl[m->actuator_ctrladr[i]];
+      ctrl = d->ctrl[adr];
     }
-    if (!mjDISABLED(mjDSBL_CLAMPCTRL) && m->actuator_ctrllimited[i]) {
-      ctrl = mju_clip(ctrl, m->actuator_ctrlrange[2*i], m->actuator_ctrlrange[2*i+1]);
+    if (!mjDISABLED(mjDSBL_CLAMPCTRL) && m->actuator_ctrllimited[adr]) {
+      ctrl = mju_clip(ctrl, m->actuator_ctrlrange[2*adr], m->actuator_ctrlrange[2*adr+1]);
     }
     return ctrl;
   }
@@ -2762,23 +2774,34 @@ static inline void mjd_viscous_drag(
   const mjtNum eq_sphere_D = 2.0/3.0 * (size[0] + size[1] + size[2]);
   const mjtNum A_max = mjPI * d_max * d_mid;
 
-  const mjtNum a = pow2(size[1] * size[2]);
-  const mjtNum b = pow2(size[2] * size[0]);
-  const mjtNum c = pow2(size[0] * size[1]);
-  const mjtNum aa = a*a, bb = b*b, cc = c*c;
+  const mjtNum inv_dmax = d_max > mjMINVAL ? 1.0 / d_max : 0.0;
+  const mjtNum s0 = size[0] * inv_dmax;
+  const mjtNum s1 = size[1] * inv_dmax;
+  const mjtNum s2 = size[2] * inv_dmax;
 
-  const mjtNum x = lvel[3], y = lvel[4], z = lvel[5];
+  const mjtNum norm = mju_norm3(lvel+3);
+  const mjtNum inv_norm = norm > mjMINVAL ? 1.0 / norm : 0.0;
+  const mjtNum x = lvel[3] * inv_norm;
+  const mjtNum y = lvel[4] * inv_norm;
+  const mjtNum z = lvel[5] * inv_norm;
   const mjtNum xx = x*x, yy = y*y, zz = z*z, xy=x*y, yz=y*z, xz=x*z;
 
+  const mjtNum a_raw = pow2(s1 * s2);
+  const mjtNum b_raw = pow2(s2 * s0);
+  const mjtNum c_raw = pow2(s0 * s1);
+  const mjtNum proj_num = a_raw * xx + b_raw * yy + c_raw * zz;
+  const mjtNum inv_proj_num = proj_num > mjMINVAL ? 1.0 / proj_num : 0.0;
+  const mjtNum a = a_raw * inv_proj_num;
+  const mjtNum b = b_raw * inv_proj_num;
+  const mjtNum c = c_raw * inv_proj_num;
+  const mjtNum aa = a*a, bb = b*b, cc = c*c;
+
   const mjtNum proj_denom = aa*xx + bb*yy + cc*zz;
-  const mjtNum proj_num = a*xx + b*yy + c*zz;
-  const mjtNum dA_coef = mjPI / mju_max(mjMINVAL,
-                                        mju_sqrt(proj_num*proj_num*proj_num * proj_denom));
+  const mjtNum area_scale = d_max * d_max * mju_sqrt(proj_num);
+  const mjtNum dA_coef = proj_denom > mjMINVAL ?
+                         mjPI * area_scale / mju_sqrt(proj_denom) : 0.0;
 
-  const mjtNum A_proj = mjPI * mju_sqrt(proj_denom/mju_max(mjMINVAL, proj_num));
-
-  const mjtNum norm = mju_sqrt(xx + yy + zz);
-  const mjtNum inv_norm = 1.0 / mju_max(mjMINVAL, norm);
+  const mjtNum A_proj = mjPI * area_scale * mju_sqrt(proj_denom);
 
   const mjtNum lin_coef = fluid_viscosity * 3.0 * mjPI * eq_sphere_D;
   const mjtNum quad_coef = fluid_density * (
@@ -2802,8 +2825,8 @@ static inline void mjd_viscous_drag(
   D[4] += inner;
   D[8] += inner;
 
-  // scale by -quad_coef*inv_norm
-  mju_scl(D, D, -quad_coef*inv_norm, 9);
+  // scale by -quad_coef*norm
+  mju_scl(D, D, -quad_coef*norm, 9);
 
   // D += outer_product(-[x y z], dAproj_dv)
   mju_addToScl3(D+0, dAproj_dv, -x);
@@ -2821,24 +2844,39 @@ static inline void mjd_viscous_drag(
 static inline void mjd_kutta_lift(
   mjtNum* restrict D, const mjtNum lvel[6], const mjtNum fluid_density,
   const mjtNum size[3], const mjtNum kutta_lift_coef) {
-  const mjtNum a = pow2(size[1] * size[2]);
-  const mjtNum b = pow2(size[2] * size[0]);
-  const mjtNum c = pow2(size[0] * size[1]);
-  const mjtNum aa = a*a, bb = b*b, cc = c*c;
-  const mjtNum x = lvel[3], y = lvel[4], z = lvel[5];
+  const mjtNum d_max = mju_max(mju_max(size[0], size[1]), size[2]);
+  const mjtNum inv_dmax = d_max > mjMINVAL ? 1.0 / d_max : 0.0;
+  const mjtNum s0 = size[0] * inv_dmax;
+  const mjtNum s1 = size[1] * inv_dmax;
+  const mjtNum s2 = size[2] * inv_dmax;
+
+  const mjtNum norm = mju_norm3(lvel+3);
+  const mjtNum inv_norm = norm > mjMINVAL ? 1.0 / norm : 0.0;
+  const mjtNum x = lvel[3] * inv_norm;
+  const mjtNum y = lvel[4] * inv_norm;
+  const mjtNum z = lvel[5] * inv_norm;
   const mjtNum xx = x*x, yy = y*y, zz = z*z, xy=x*y, yz=y*z, xz=x*z;
 
+  const mjtNum a_raw = pow2(s1 * s2);
+  const mjtNum b_raw = pow2(s2 * s0);
+  const mjtNum c_raw = pow2(s0 * s1);
+  const mjtNum proj_num = a_raw * xx + b_raw * yy + c_raw * zz;
+  const mjtNum inv_proj_num = proj_num > mjMINVAL ? 1.0 / proj_num : 0.0;
+  const mjtNum a = a_raw * inv_proj_num;
+  const mjtNum b = b_raw * inv_proj_num;
+  const mjtNum c = c_raw * inv_proj_num;
+  const mjtNum aa = a*a, bb = b*b, cc = c*c;
+
   const mjtNum proj_denom = aa * xx + bb * yy + cc * zz;
-  const mjtNum proj_num = a * xx + b * yy + c * zz;
-  const mjtNum norm2 = xx + yy + zz;
-  const mjtNum df_denom = mjPI * kutta_lift_coef * fluid_density / mju_max(
-    mjMINVAL, mju_sqrt(proj_denom * proj_num * norm2));
+  const mjtNum area_scale = d_max * d_max * mju_sqrt(proj_num);
+  const mjtNum df_denom = proj_denom > mjMINVAL ?
+    mjPI * kutta_lift_coef * fluid_density * area_scale * norm / mju_sqrt(proj_denom) : 0.0;
 
   const mjtNum dfx_coef = yy * (a - b) + zz * (a - c);
   const mjtNum dfy_coef = xx * (b - a) + zz * (b - c);
   const mjtNum dfz_coef = xx * (c - a) + yy * (c - b);
-  const mjtNum proj_term = proj_num / mju_max(mjMINVAL, proj_denom);
-  const mjtNum cos_term = proj_num / mju_max(mjMINVAL, norm2);
+  const mjtNum proj_term = proj_denom > mjMINVAL ? 1.0 / proj_denom : 0.0;
+  const mjtNum cos_term = 1.0;
 
   // cosA = proj_num/(norm*proj_denom), A_proj = pi*sqrt(proj_denom/proj_num)
   // F = cosA * A_proj * (([a,b,c] * vel) \times vel) \times vel
@@ -2847,7 +2885,7 @@ static inline void mjd_kutta_lift(
   D[0] = a-a;  D[1] = b-a;  D[2] = c-a;
   D[3] = a-b;  D[4] = b-b;  D[5] = c-b;
   D[6] = a-c;  D[7] = b-c;  D[8] = c-c;
-  mju_scl(D, D, 2 * proj_num, 9);
+  mju_scl(D, D, 2.0, 9);
 
   const mjtNum inner_term[3] = {
     aa * proj_term - a + cos_term,
@@ -2862,9 +2900,9 @@ static inline void mjd_kutta_lift(
   D[3] *= xy;  D[4] *= yy;  D[5] *= yz;
   D[6] *= xz;  D[7] *= yz;  D[8] *= zz;
 
-  D[0] -= dfx_coef * proj_num;
-  D[4] -= dfy_coef * proj_num;
-  D[8] -= dfz_coef * proj_num;
+  D[0] -= dfx_coef;
+  D[4] -= dfy_coef;
+  D[8] -= dfz_coef;
 
   mju_scl(D, D, df_denom, 9);
 }
@@ -3301,7 +3339,8 @@ void mjd_smooth_vel(const mjModel* m, mjData* d, int flg_bias) {
 
 
 //------------------- implicit effective metric Mtilde = M + h*D + h^2*K --------------------------
-// The flex part is K = (h^2 + h*damping) * (K_bend + K_stretch), the PSD implicit flex stiffness;
+// The flex part is K = (h^2 + h*damping) * (K_bend + K_stretch), the PSD implicit flex stiffness,
+// whose h^2 and h*damping parts enter only when the spring and damper forces are enabled;
 // the diagonal part holds joint damping and stiffness (h*D + h^2*K per dof, clamped PSD). Built
 // once per step on the arena by mjd_effBuild (under integrator=discrete), then consumed
 // uniformly: the smooth acceleration, the constraint solver and inverse dynamics all see the
@@ -3492,12 +3531,15 @@ void mjd_effMulAdd(const mjModel* m, mjData* d, mjtNum* res, const mjtNum* vec, 
 
   // terms not folded into the CSR fall back to the matrix-free operators; which terms those
   // are is derivable, not state: the CSR is only ever built with bending included, and with
-  // interp included iff the model is assemblable
+  // interp included iff the model is assemblable. As in the CSR, the stiffness and damping
+  // parts enter only when their forces are enabled
+  mjtNum s1 = mjDISABLED(mjDSBL_SPRING) ? 0 : h*h;
+  mjtNum s2 = mjDISABLED(mjDSBL_DAMPER) ? 0 : h;
   if (!d->nefmK) {
-    mjd_flexBend_mul(m, d, res, vec, h*h, h);
+    mjd_flexBend_mul(m, d, res, vec, s1, s2);
   }
   if (!d->nefmK || !mjd_flexInterpAssemblable(m)) {
-    mjd_flexInterp_mul(m, d, res, vec, -(h*h), -h, d->flexelem_krot);
+    mjd_flexInterp_mul(m, d, res, vec, -s1, -s2, d->flexelem_krot);
   }
 }
 
@@ -3953,9 +3995,13 @@ void mjd_effShift(const mjModel* m, mjData* d) {
   }
   mjtNum h = m->opt.timestep;
   mju_zero(d->efm_c, m->nv);
-  mjd_flexInterp_mul(m, d, d->efm_c, d->qvel, h, 0, d->flexelem_krot);
-  mjd_flexBend_mul(m, d, d->efm_c, d->qvel, -h, 0);
-  mjd_flexStretch_mul(m, d, d->efm_c, d->qvel, -h, 0);
+
+  // flex stiffness shift, absent when the spring force is disabled
+  if (!mjDISABLED(mjDSBL_SPRING)) {
+    mjd_flexInterp_mul(m, d, d->efm_c, d->qvel, h, 0, d->flexelem_krot);
+    mjd_flexBend_mul(m, d, d->efm_c, d->qvel, -h, 0);
+    mjd_flexStretch_mul(m, d, d->efm_c, d->qvel, -h, 0);
+  }
 
   // contact: -h*K_contact*v from the packed rank-1 rows (see effContactBuild), so the shift
   // and the operator apply one definition of contact. Each row's scale already carries the h^2
@@ -4283,8 +4329,8 @@ static void effContactBuild(const mjModel* m, mjData* d, mjtNum scale) {
 }
 
 
-// apply the published rows' forces, res += force * row: the passive stage and the IPC inner
-// solve both take their contact force from the rows the metric build published
+// apply the published rows' forces, res += force * row: the passive stage takes its contact
+// force from the rows the metric build published
 void mjd_effContactForce(const mjData* d, mjtNum* res) {
   const int* ind = d->efm_con_ind;
   const mjtNum* val = d->efm_con_val;
@@ -4294,7 +4340,7 @@ void mjd_effContactForce(const mjData* d, mjtNum* res) {
     const int* colind = ind + adr + 2;
     const mjtNum* row = val + adr + 2;
     for (int a = 0; a < nnz; a++) {
-      // fused multiply-add: rounding the product first moves the IPC mode's results by an ulp
+      // fused multiply-add: rounding the product first moves the results by an ulp
       res[colind[a]] += f * row[a];
     }
     adr += 2 + nnz;
@@ -4388,9 +4434,10 @@ void mjd_effBuild(const mjModel* m, mjData* d, int active, int flg_factor) {
   }
 
   // the tendon and actuator diagonals join the qH backbone: force the diagonal machinery on.
-  // Fluid drag is gated on the medium alone, matching the force computation: the spring and
-  // damper disable flags do not touch fluid forces
-  int any_fluid = m->opt.viscosity > 0 || m->opt.density > 0;
+  // Fluid drag and passive flex contact enter only while their forces are applied: mj_passive
+  // skips them, like every passive force, when both the spring and damper forces are disabled
+  int passive = !(mjDISABLED(mjDSBL_SPRING) && mjDISABLED(mjDSBL_DAMPER));
+  int any_fluid = passive && (m->opt.viscosity > 0 || m->opt.density > 0);
   d->efm_diag = (any_diag || d->nefmT || any_act || any_fluid) ? EFMALLOC(mjtNum, nv) : NULL;
   d->efm_sdiag = d->efm_diag ? EFMALLOC(mjtNum, nv) : NULL;
   d->efm_fluid = any_fluid ? EFMALLOC(mjtNum, m->nC) : NULL;
@@ -4398,7 +4445,10 @@ void mjd_effBuild(const mjModel* m, mjData* d, int active, int flg_factor) {
   // assemble the standard-flex part of B into CSR (constant during the step). With stretch or
   // assemblable interp present, assemble the FULL matrix (bending included): one CSR then
   // serves both the matvec and the per-step factor. Bending-only models keep the stencil
-  // operator + the constant mj_setConst factor.
+  // operator + the constant mj_setConst factor. The stiffness (s1) and damping (s2) parts enter
+  // only when their forces are enabled; the structure does not depend on the flags
+  mjtNum s1 = mjDISABLED(mjDSBL_SPRING) ? 0 : h*h;
+  mjtNum s2 = mjDISABLED(mjDSBL_DAMPER) ? 0 : h;
   const mjtNum* krot = mjd_flexInterpAssemblable(m) ? d->flexelem_krot : NULL;
   d->efm_K_rownnz = EFMALLOC(int, nv);
   d->efm_K_rowadr = EFMALLOC(int, nv);
@@ -4415,16 +4465,18 @@ void mjd_effBuild(const mjModel* m, mjData* d, int active, int flg_factor) {
   }
   if (assemble_any) {
     d->nefmK = mjd_flexStiff_assemble(m, d, d->efm_K_rownnz, d->efm_K_rowadr,
-                                      NULL, NULL, h*h, h, /*bend*/ 1, /*stretch*/ 1, krot);
+                                      NULL, NULL, s1, s2, /*bend*/ 1, /*stretch*/ 1, krot);
   }
 
   // passive flex contact is a rank-1 class, not CSR entries (see effContactBuild)
-  effContactBuild(m, d, h*h);
+  if (passive) {
+    effContactBuild(m, d, h*h);
+  }
   if (d->nefmK) {
     d->efm_K_colind = EFMALLOC(int, d->nefmK);
     d->efm_K_val    = EFMALLOC(mjtNum, d->nefmK);
     mjd_flexStiff_assemble(m, d, d->efm_K_rownnz, d->efm_K_rowadr,
-                           d->efm_K_colind, d->efm_K_val, h*h, h,
+                           d->efm_K_colind, d->efm_K_val, s1, s2,
                            /*bend*/ 1, /*stretch*/ 1, krot);
     // per-step factor of the flex block of (M + K): the stiffness is constant during the
     // step, so one factorization here turns every preconditioner application into a direct

@@ -1581,6 +1581,13 @@ typedef struct mjrfRenderRequest_ {
   mjtBool enable_post_processing;    // enable post processing, enabled by default
   mjtBool enable_reflections;        // enable reflections, enabled by default
   mjtBool enable_shadows;            // enable shadows, enabled by default
+
+  // The headlight is a directional light aligned with this request's camera. It
+  // is a property of the request rather than of the scene, so that a scene
+  // rendered from several cameras is not lit by any one of them.
+  mjtBool enable_headlight;          // enable the headlight, disabled by default
+  float headlight_color[3];          // headlight color, RGB
+  float headlight_intensity;         // headlight intensity, in lux
 } mjrfRenderRequest;
 typedef struct mjrfReadPixelsRequest_ {
   mjrfRenderTarget* target;              // render target from which to read the image pixels
@@ -3782,7 +3789,8 @@ void mj_extractState(const mjModel* m, const mjtNum* src, int srcsig,
                      mjtNum* dst, int dstsig);
 void mj_setState(const mjModel* m, mjData* d, const mjtNum* state, int sig);
 void mj_copyState(const mjModel* m, const mjData* src, mjData* dst, int sig);
-mjtNum mj_readCtrl(const mjModel* m, const mjData* d, int id, mjtNum time, int interp);
+const mjtNum* mj_readCtrl(const mjModel* m, const mjData* d, int id, mjtNum time,
+                          mjtNum* result, int interp);
 const mjtNum* mj_readSensor(const mjModel* m, const mjData* d, int id, mjtNum time,
                             mjtNum* result, int interp);
 void mj_initCtrlHistory(const mjModel* m, mjData* d, int id,
@@ -4122,6 +4130,9 @@ const mjpDecoder* mjp_findDecoder(const mjResource* resource, const char* conten
 void mjp_registerEncoder(const mjpEncoder* encoder);
 void mjp_defaultEncoder(mjpEncoder* encoder);
 const mjpEncoder* mjp_findEncoder(const char* filename, const char* content_type);
+void mjp_registerArchiveResourceProvider(const mjpResourceProvider* provider);
+const mjpResourceProvider* mjp_findArchiveResourceProvider(const char* resource_name);
+int mjp_archiveResourceProviderCount(void);
 mjResource* mju_openResource(const char* dir, const char* name,
                              const mjVFS* vfs, char* error, size_t nerror);
 void mju_closeResource(mjResource* resource);

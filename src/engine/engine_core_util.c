@@ -1116,6 +1116,38 @@ int tendonLimit(const mjModel* m, const mjtNum* ten_length, int i) {
 }
 
 
+// compute spring and damper forces along tendon i, zero when disabled
+void mj_tendonSpringDamper(const mjModel* m, const mjData* d, int i,
+                           mjtNum* frc_spring, mjtNum* frc_damper) {
+  *frc_spring = 0;
+  *frc_damper = 0;
+
+  // spring force: displacement outside the spring range
+  if (!mjDISABLED(mjDSBL_SPRING)) {
+    mjtNum stiffness = m->tendon_stiffness[i];
+    const mjtNum* spoly = m->tendon_stiffnesspoly + mjNPOLY*i;
+    if (stiffness || !mju_isZero(spoly, mjNPOLY)) {
+      mjtNum length = d->ten_length[i];
+      mjtNum lower = m->tendon_lengthspring[2*i];
+      mjtNum upper = m->tendon_lengthspring[2*i+1];
+      mjtNum x = (length > upper) ? length - upper : (length < lower) ? length - lower : 0;
+      *frc_spring = -x * mju_polyForce(stiffness, spoly, x, mjNPOLY, 0);
+    }
+  }
+
+  // damper force: velocity, damping includes the contribution of actuators
+  if (!mjDISABLED(mjDSBL_DAMPER)) {
+    mjtNum dpoly[mjNPOLY];
+    mju_copy(dpoly, m->tendon_dampingpoly + mjNPOLY*i, mjNPOLY);
+    mjtNum damping = m->tendon_damping[i] + mj_actuatorDamping(m, mjOBJ_TENDON, i, dpoly);
+    if (damping || !mju_isZero(dpoly, mjNPOLY)) {
+      mjtNum v = d->ten_velocity[i];
+      *frc_damper = -v * mju_polyForce(damping, dpoly, v, mjNPOLY, 1);
+    }
+  }
+}
+
+
 // return actuator damping contribution to joint or tendon
 mjtNum mj_actuatorDamping(const mjModel* m, mjtObj type, int id, mjtNum poly[mjNPOLY]) {
   if (type != mjOBJ_TENDON && type != mjOBJ_JOINT) {
@@ -1313,9 +1345,10 @@ int mj_effFlexStiffPossible(const mjModel* m, int f) {
     return 0;
   }
 
-  // stretch stiffness present
+  // stretch stiffness present (the strain equality mode stores its constraint
+  // eigenmodes in this block instead)
   int sadr = m->flex_stiffnessadr[f];
-  if (sadr >= 0 && m->flex_stiffness[sadr] != 0) {
+  if (sadr >= 0 && m->flex_stiffness[sadr] != 0 && m->flex_edgeequality[f] != 3) {
     return 1;
   }
 

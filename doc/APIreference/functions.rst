@@ -323,8 +323,21 @@ Copy state from src to dst.
 .. mujoco-include:: mj_readCtrl
 
 Read the control value for an actuator at a given time, taking delays into account. If no history buffer exists, return
-``mjData.ctrl[id]``. If a history buffer exists (:ref:`nsample<actuator-general-nsample>` > 0), read from the delay
-buffer at ``time - actuator_delay[id]`` using the requested interpolation order:
+a pointer to the actuator's slice of ``mjData.ctrl``. If a history buffer exists (:ref:`nsample<actuator-general-nsample>` > 0),
+read from the delay buffer at ``time - actuator_delay[id]``. Note that the subtraction of the delay changes the semantic
+of the ``time`` argument from "time at which values were pushed into the delay buffer" to "time at which values come out
+of the delay buffer". See :ref:`Delays<CDelay>` for details.
+
+**Return value semantics:**
+
+- If no history buffer exists (:ref:`nsample<actuator-general-nsample>` = 0), returns a pointer to the actuator's slice
+  of ``mjData.ctrl``.
+- If a history buffer exists (:ref:`nsample<actuator-general-nsample>` > 0) and the requested time matches a stored
+  sample (always true for ``interp = 0``), returns a pointer to the data in the history buffer.
+- If interpolation is required (``interp = 1 or 2``), returns ``NULL`` and writes the interpolated result to
+  ``result`` (must be of size ``actuator_ctrlnum[id]``).
+
+**Interpolation:**
 
 - ``interp = 0``: Zero-order hold (piecewise constant)
 - ``interp = 1``: Piecewise Linear
@@ -332,10 +345,6 @@ buffer at ``time - actuator_delay[id]`` using the requested interpolation order:
 - ``interp = -1``: Use the actuator's :ref:`interp<actuator-general-interp>` value.
 
 Constant extrapolation is used outside of buffer bounds.
-
-Note that the subtraction of the delay changes the semantic of the ``time`` argument from "time at which values were
-pushed into the delay buffer" to "time at which values come out of the delay buffer". See :ref:`Delays<CDelay>` for
-details.
 
 .. _mj_readSensor:
 
@@ -386,8 +395,9 @@ Constant extrapolation is used outside of buffer bounds.
 .. mujoco-include:: mj_initCtrlHistory
 
 Initialize the history buffer for an actuator with custom values. The ``times`` array specifies the timestamps for each
-sample (must be length :ref:`nsample<actuator-general-nsample>`), and ``values`` specifies the control values. If
-``times`` is ``NULL``, the existing timestamps in the buffer are used, and only the values are updated.
+sample (must be length :ref:`nsample<actuator-general-nsample>`), and ``values`` specifies the control values (must be of
+size ``nsample * actuator_ctrlnum[id]``). If ``times`` is ``NULL``, the existing timestamps in the buffer are used, and
+only the values are updated.
 See :ref:`Delays<CDelay>` for details.
 
 .. _mj_initSensorHistory:
@@ -1190,8 +1200,12 @@ This function is triggered automatically if the following sensors are present in
 :ref:`framelinacc<sensor-framelinacc>`, :ref:`frameangacc<sensor-frameangacc>`.
 It is also triggered for :ref:`user sensors<sensor-user>` of :ref:`stage<sensor-user-needstage>` "acc".
 
-The computed force arrays ``cfrc_int`` and ``cfrc_ext`` currently suffer from a know bug, they do not take into account
-the effect of spatial tendons, see :issue:`832`.
+``cfrc_ext`` collects the forces that are not transmitted through the joints: applied Cartesian forces
+(``xfrc_applied``), contacts, connect and weld constraints, and spatial tendons (spring, damper, actuator, constraint
+and armature forces along the tendon path). ``cfrc_int`` is then the wrench transmitted through the joint, and its
+projection on the joint axes is the total joint-space force. Forces of actuators with site, slider-crank and body
+transmissions, gravity compensation, fluid forces, flex forces and custom passive forces are not yet collected and are
+attributed to the joints.
 
 .. _mj_maxContact:
 
@@ -3791,6 +3805,8 @@ These matrices and their dimensions are:
 - ``eps`` is the finite-differencing epsilon.
 - ``flg_centered`` denotes whether to use forward (0) or centered (1) differences.
 - The Runge-Kutta integrator (:ref:`mjINT_RK4<mjtIntegrator>`) is not supported.
+- :ref:`Sleeping<Sleeping>` is not supported. Disable the :ref:`sleep<option-flag-sleep>` flag before calling.
+- :ref:`Delays<CDelay>` are not supported.
 
 .. admonition:: Improving speed and accuracy
    :class: tip
@@ -3855,6 +3871,7 @@ using finite-differencing. These matrices and their dimensions are:
 .. attention::
    - The Runge-Kutta 4th-order integrator (``mjINT_RK4``) is not supported.
    - The noslip solver is not supported.
+   - :ref:`Sleeping<Sleeping>` is not supported. Disable the :ref:`sleep<option-flag-sleep>` flag before calling.
 
 *Nullable:* ``DfDq``, ``DfDv``, ``DfDa``, ``DsDq``, ``DsDv``, ``DsDa``, ``DmDq``
 
@@ -4103,6 +4120,36 @@ Set default resource encoder definition.
 Return the encoder that matches against the content type or filename extension.
 
 If no match, return NULL.
+
+.. _mjp_registerArchiveResourceProvider:
+
+`mjp_registerArchiveResourceProvider <#mjp_registerArchiveResourceProvider>`__
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+.. mujoco-include:: mjp_registerArchiveResourceProvider
+
+Globally register an archive resource provider. This function is thread-safe.
+provider->prefix specifies the filename extension(s) (e.g. .mjz|.zip).
+
+.. _mjp_findArchiveResourceProvider:
+
+`mjp_findArchiveResourceProvider <#mjp_findArchiveResourceProvider>`__
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+.. mujoco-include:: mjp_findArchiveResourceProvider
+
+Return the archive resource provider that matches against the resource name.
+
+If no match, return NULL.
+
+.. _mjp_archiveResourceProviderCount:
+
+`mjp_archiveResourceProviderCount <#mjp_archiveResourceProviderCount>`__
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+.. mujoco-include:: mjp_archiveResourceProviderCount
+
+Return the number of globally registered archive resource providers.
 
 .. _Thread:
 
