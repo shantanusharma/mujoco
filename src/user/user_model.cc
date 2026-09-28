@@ -1143,7 +1143,6 @@ void mjCModel::Clear() {
   nefm0L         = 0;
   nflexelemedge  = 0;
   nflexshelldata = 0;
-  nflexevpair    = 0;
   nflextexcoord  = 0;
   nJfe           = 0;
   nJfv           = 0;
@@ -2073,82 +2072,11 @@ void mjCModel::SetSizes() {
     nflexelemdata  += flexes_[i]->nelem * (flexes_[i]->dim + 1);
     nflexelemedge  += flexes_[i]->nelem * mjCFlex::kNumEdges[flexes_[i]->dim - 1];
     nflexshelldata += (int)flexes_[i]->shell.size();
-    nflexevpair    += (int)flexes_[i]->evpair.size() / 2;
     nflextexcoord  += (flexes_[i]->HasTexcoord() ? flexes_[i]->get_texcoord().size() / 2 : 0);
     nflexstiffness += flexes_[i]->stiffness.size();
     nflexbending   += flexes_[i]->bending.size();
     if (flexes_[i]->interpolated || flexes_[i]->rigid) { continue; }
 
-    // bending factor sizes: symbolic reverse-Cholesky count on the (M + K_bend) pattern.
-    // Bending couples only same-coordinate dofs of unpinned flap vertices, so the pattern is
-    // three interleaved copies of the vertex flap adjacency. The count must match the symbolic
-    // factorization performed in mj_setConst (asserted there).
-    if (flexes_[i]->dim == 2 && !flexes_[i]->bending.empty()) {
-      const mjCFlex* fl   = flexes_[i];
-      int            nvrt = fl->nvert;
-
-      // unpinned vertices -> compact slots (vertex enumeration order)
-      std::vector<int> slot(nvrt, -1);
-      int              nfree = 0;
-      for (int v = 0; v < nvrt; v++) {
-        if (!bodies_[fl->vertbodyid[v]]->joints.empty()) { slot[v] = nfree++; }
-      }
-      if (!nfree) { continue; }
-
-      // vertex adjacency from 4-vertex flap stencils (self excluded; diagonal is implicit)
-      std::vector<std::set<int>> adj(nfree);
-      for (const auto& flap : fl->flaps) {
-        if (flap.vertices[3] < 0) { continue; }
-        for (int a = 0; a < 4; a++) {
-          int sa = slot[flap.vertices[a]];
-          if (sa < 0) continue;
-          for (int b = 0; b < 4; b++) {
-            int sb = slot[flap.vertices[b]];
-            if (sb >= 0 && sb != sa) { adj[sa].insert(sb); }
-          }
-        }
-      }
-
-      // dof-level upper-triangle pattern: row 3*s+k has columns {3*t+k : t > s, t in adj(s)}
-      int                           n = 3 * nfree;
-      std::vector<std::vector<int>> upper(n);
-      for (int s = 0; s < nfree; s++) {
-        for (int t : adj[s]) {
-          if (t > s) {
-            for (int k = 0; k < 3; k++) { upper[3 * s + k].push_back(3 * t + k); }
-          }
-        }
-      }
-      for (auto& row : upper) { std::sort(row.begin(), row.end()); }
-
-      // flatten the pattern to CSR and count fill with the engine's symbolic factorization
-      // (d == NULL: no mjData exists yet, scratch is heap-allocated)
-      std::vector<int> u_rownnz(n), u_rowadr(n), u_colind;
-      int              u_nnz = 0;
-      for (int r = 0; r < n; r++) { u_nnz += (int)upper[r].size(); }
-      u_colind.reserve(u_nnz);
-      for (int r = 0; r < n; r++) {
-        u_rownnz[r] = (int)upper[r].size();
-        u_rowadr[r] = (int)u_colind.size();
-        u_colind.insert(u_colind.end(), upper[r].begin(), upper[r].end());
-      }
-      std::vector<int> L_rownnz(n), L_rowadr(n), LT_rownnz(n), LT_rowadr(n);
-      mjtSize          nnz = mju_cholFactorSymbolic(NULL,
-                                                    L_rownnz.data(),
-                                                    L_rowadr.data(),
-                                                    NULL,
-                                                    LT_rownnz.data(),
-                                                    LT_rowadr.data(),
-                                                    NULL,
-                                                    u_rownnz.data(),
-                                                    u_rowadr.data(),
-                                                    u_colind.data(),
-                                                    n,
-                                                    NULL);
-
-      nefm0dof += n;
-      nefm0L   += nnz;
-    }
 
     // count number of non-zero elements in the edge Jacobian matrix
     for (const auto& edge : flexes_[i]->edge) {
@@ -2189,6 +2117,93 @@ void mjCModel::SetSizes() {
       }
       for (mjCBody* b : bodies_in_jac) { nJfv += b->dofnum; }
     }
+  }
+
+  // bending factor sizes: symbolic reverse-Cholesky count on the (M + K_bend) pattern.
+  // Each flap couples full 3x3 blocks: its vertex bodies can have different orientations.
+  // The count must match the symbolic factorization performed in mj_setConst (asserted there).
+  std::vector<int> body_slot(bodies_.size(), -1);
+  for (int i = 0; i < nflex; i++) {
+    if (flexes_[i]->interpolated || flexes_[i]->rigid || !flexes_[i]->IsSimple()) { continue; }
+    if (flexes_[i]->dim == 2 && !flexes_[i]->bending.empty()) {
+      const mjCFlex* fl = flexes_[i];
+      for (int v = 0; v < fl->nvert; v++) {
+        int wid = bodies_[fl->vertbodyid[v]]->weldid;
+        if (bodies_[wid]->dofnum == 3) { body_slot[wid] = 1; }
+      }
+    }
+  }
+  int nfree = 0;
+  for (int b = 0; b < (int)bodies_.size(); b++) {
+    if (body_slot[b] > 0) { body_slot[b] = nfree++; }
+  }
+  if (nfree) {
+    // vertex adjacency from 4-vertex flap stencils across all qualifying flexes
+    std::vector<std::set<int>> adj(nfree);
+    for (int i = 0; i < nflex; i++) {
+      if (flexes_[i]->interpolated || flexes_[i]->rigid || !flexes_[i]->IsSimple()) { continue; }
+      if (flexes_[i]->dim == 2 && !flexes_[i]->bending.empty()) {
+        const mjCFlex*   fl = flexes_[i];
+        std::vector<int> slot(fl->nvert, -1);
+        for (int v = 0; v < fl->nvert; v++) {
+          slot[v] = body_slot[bodies_[fl->vertbodyid[v]]->weldid];
+        }
+        for (const auto& flap : fl->flaps) {
+          if (flap.vertices[3] < 0) { continue; }
+          for (int a = 0; a < 4; a++) {
+            int sa = slot[flap.vertices[a]];
+            if (sa < 0) continue;
+            for (int b = 0; b < 4; b++) {
+              int sb = slot[flap.vertices[b]];
+              if (sb >= 0 && sb != sa) { adj[sa].insert(sb); }
+            }
+          }
+        }
+      }
+    }
+
+    // Expand each off-diagonal vertex block to all coordinate pairs. Diagonal blocks are
+    // diagonal (R_b^T * R_b = I); any off-coordinate factor fill is counted symbolically.
+    int                           n = 3 * nfree;
+    std::vector<std::vector<int>> upper(n);
+    for (int s = 0; s < nfree; s++) {
+      for (int t : adj[s]) {
+        if (t > s) {
+          for (int k = 0; k < 3; k++) {
+            for (int l = 0; l < 3; l++) { upper[3 * s + k].push_back(3 * t + l); }
+          }
+        }
+      }
+    }
+    for (auto& row : upper) { std::sort(row.begin(), row.end()); }
+
+    // flatten the pattern to CSR and count fill with the engine's symbolic factorization
+    // (d == NULL: no mjData exists yet, scratch is heap-allocated)
+    std::vector<int> u_rownnz(n), u_rowadr(n), u_colind;
+    int              u_nnz = 0;
+    for (int r = 0; r < n; r++) { u_nnz += (int)upper[r].size(); }
+    u_colind.reserve(u_nnz);
+    for (int r = 0; r < n; r++) {
+      u_rownnz[r] = (int)upper[r].size();
+      u_rowadr[r] = (int)u_colind.size();
+      u_colind.insert(u_colind.end(), upper[r].begin(), upper[r].end());
+    }
+    std::vector<int> L_rownnz(n), L_rowadr(n), LT_rownnz(n), LT_rowadr(n);
+    mjtSize          nnz = mju_cholFactorSymbolic(NULL,
+                                                  L_rownnz.data(),
+                                                  L_rowadr.data(),
+                                                  NULL,
+                                                  LT_rownnz.data(),
+                                                  LT_rowadr.data(),
+                                                  NULL,
+                                                  u_rownnz.data(),
+                                                  u_rowadr.data(),
+                                                  u_colind.data(),
+                                                  n,
+                                                  NULL);
+
+    nefm0dof = n;
+    nefm0L   = nnz;
   }
 
   // mesh counts
@@ -2831,7 +2846,7 @@ void mjCModel::CopyTree(mjModel* m) {
       m->geom_conaffinity[gid] = pg->conaffinity;
       m->geom_condim[gid]      = pg->condim;
       m->geom_bodyid[gid]      = pg->body->id;
-      if (pg->mesh) {
+      if (pg->mesh && (pg->type == mjGEOM_MESH || pg->type == mjGEOM_SDF)) {
         m->geom_dataid[gid] = pg->mesh->id;
       } else if (pg->hfield) {
         m->geom_dataid[gid] = pg->hfield->id;
@@ -3243,7 +3258,7 @@ int mjCModel::CountNJten(const mjModel* m) {
 void mjCModel::CopyObjects(mjModel* m) {
   mjtSize adr, bone_adr, vert_adr, node_adr, normal_adr, face_adr, texcoord_adr, oct_adr;
   mjtSize stiffness_adr, bending_adr;
-  mjtSize edge_adr, elem_adr, elemdata_adr, elemedge_adr, shelldata_adr, evpair_adr;
+  mjtSize edge_adr, elem_adr, elemdata_adr, elemedge_adr, shelldata_adr;
   mjtSize bonevert_adr, graph_adr, data_adr, bvh_adr;
   mjtSize poly_adr, polymap_adr, polyvert_adr;
 
@@ -3398,7 +3413,6 @@ void mjCModel::CopyObjects(mjModel* m) {
   elemdata_adr  = 0;
   elemedge_adr  = 0;
   shelldata_adr = 0;
-  evpair_adr    = 0;
   texcoord_adr  = 0;
   stiffness_adr = 0;
   bending_adr   = 0;
@@ -3455,14 +3469,6 @@ void mjCModel::CopyObjects(mjModel* m) {
     m->flex_elemedgeadr[i]  = elemedge_adr;
     m->flex_shellnum[i]     = (int)pfl->shell.size() / pfl->dim;
     m->flex_shelldataadr[i] = m->flex_shellnum[i] ? shelldata_adr : -1;
-    if (pfl->evpair.empty()) {
-      m->flex_evpairadr[i] = -1;
-      m->flex_evpairnum[i] = 0;
-    } else {
-      m->flex_evpairadr[i] = evpair_adr;
-      m->flex_evpairnum[i] = (int)pfl->evpair.size() / 2;
-      memcpy(m->flex_evpair + 2 * evpair_adr, pfl->evpair.data(), pfl->evpair.size() * sizeof(int));
-    }
     if (pfl->texcoord_.empty()) {
       m->flex_texcoordadr[i] = -1;
       memcpy(m->flex_elemtexcoord + elemdata_adr,
@@ -3490,7 +3496,6 @@ void mjCModel::CopyObjects(mjModel* m) {
     m->flex_edgedamping[i]   = (mjtNum)pfl->edgedamping;
     m->flex_rigid[i]         = pfl->rigid;
     m->flex_centered[i]      = pfl->centered;
-    m->flex_internal[i]      = pfl->internal;
     m->flex_flatskin[i]      = pfl->flatskin;
     m->flex_selfcollide[i]   = pfl->selfcollide;
     m->flex_activelayers[i]  = pfl->activelayers;
@@ -3629,7 +3634,6 @@ void mjCModel::CopyObjects(mjModel* m) {
     elemdata_adr  += (pfl->dim + 1) * pfl->nelem;
     elemedge_adr  += (pfl->kNumEdges[pfl->dim - 1]) * pfl->nelem;
     shelldata_adr += (int)pfl->shell.size();
-    evpair_adr    += (int)pfl->evpair.size() / 2;
     texcoord_adr  += (int)pfl->texcoord_.size() / 2;
     bvh_adr       += pfl->tree.Nbvh();
     stiffness_adr += pfl->stiffness.size();
@@ -5457,7 +5461,6 @@ void mjCModel::TryCompile(mjModel*& m, mjData*& d, const mjVFS* vfs) {
                nefm0L,
                nflexelemedge,
                nflexshelldata,
-               nflexevpair,
                nflextexcoord,
                nJfe,
                nJfv,

@@ -1019,6 +1019,88 @@ void mj_local2Global(mjData* d, mjtNum xpos[3], mjtNum xmat[9],
 
 //-------------------------- miscellaneous utilities -----------------------------------------------
 
+// Check weld parent for independent ordered XYZ slides. Used only to select fast paths;
+// general attachments use the point Jacobian. The same test sizes the constant factor in mjCFlex.
+int mj_flexBodySimple(const mjModel* m, int body) {
+  body = m->body_weldid[body];
+  if (m->body_dofnum[body] != 3 || m->body_jntnum[body] != 3 ||
+      m->body_dofnum[m->body_weldid[m->body_parentid[body]]] != 0) {
+    return 0;
+  }
+  int jadr = m->body_jntadr[body];
+  for (int j=0; j < 3; j++) {
+    if (m->jnt_type[jadr+j] != mjJNT_SLIDE) return 0;
+    for (int k=0; k < 3; k++) {
+      if (mju_abs(m->jnt_axis[3*(jadr+j)+k] - (j == k)) > mjMINVAL) return 0;
+    }
+  }
+  return 1;
+}
+
+
+// Check for standard fixed-frame three-DOF assembly flex and compatibility with cached factor.
+int mj_flexSimple(const mjModel* m, int f) {
+  for (int v=m->flex_vertadr[f]; v < m->flex_vertadr[f]+m->flex_vertnum[f]; v++) {
+    int body = m->body_weldid[m->flex_vertbodyid[v]];
+    if (m->body_dofnum[body] && !mj_flexBodySimple(m, body)) return 0;
+  }
+  return 1;
+}
+
+
+// Apply the point Jacobian or its transpose without constructing a matrix. The general
+// path walks the same motion axes as mj_jac, including every ancestor and the vertex offset.
+// Gather overwrites 3*nvert world components; scatter adds to nv generalized components.
+static void flexMap(const mjModel* m, const mjData* d, int f, mjtNum* res,
+                    const mjtNum* vec, mjtNum scale, int transpose) {
+  int vadr = m->flex_vertadr[f];
+  for (int v=0; v < m->flex_vertnum[f]; v++) {
+    int body = m->body_weldid[m->flex_vertbodyid[vadr+v]];
+    if (!transpose) mji_zero3(res + 3*v);
+    if (!m->body_dofnum[body]) continue;
+    int da = m->body_dofadr[body];
+    if (m->body_simple[body] == 2) {
+      // The world-space slide axes are already in cdof, including axis order and signs.
+      for (int j=0; j < m->body_dofnum[body]; j++) {
+        const mjtNum* axis = d->cdof + 6*(da+j)+3;
+        if (transpose) {
+          res[da+j] += scale*mju_dot3(axis, vec + 3*v);
+        } else {
+          mji_addToScl3(res + 3*v, axis, vec[da+j]);
+        }
+      }
+      continue;
+    }
+    mjtNum offset[3];
+    mji_sub3(offset, d->flexvert_xpos + 3*(vadr+v),
+             d->subtree_com + 3*m->body_rootid[body]);
+    for (int i=da + m->body_dofnum[body]-1; i >= 0; i=m->dof_parentid[i]) {
+      mjtNum column[3];
+      mji_cross(column, d->cdof + 6*i, offset);
+      mji_addTo3(column, d->cdof + 6*i+3);
+      if (transpose) {
+        res[i] += scale*mju_dot3(column, vec + 3*v);
+      } else {
+        mji_addToScl3(res + 3*v, column, vec[i]);
+      }
+    }
+  }
+}
+
+
+// Gather an arbitrary generalized vector (including qvel) in world vertex coordinates.
+void mj_flexGather(const mjModel* m, const mjData* d, int f, mjtNum* res, const mjtNum* vec) {
+  flexMap(m, d, f, res, vec, 1, 0);
+}
+
+
+// Accumulate world vertex forces in generalized coordinates, including pin reactions.
+void mj_flexScatter(const mjModel* m, const mjData* d, int f, mjtNum* res,
+                    const mjtNum* vec, mjtNum scale) {
+  flexMap(m, d, f, res, vec, scale, 1);
+}
+
+
 // gather global node positions and velocities
 void mju_flexGatherState(const mjModel* m, const mjData* d, int f, mjtNum* xpos, mjtNum* vel) {
   int nodenum = m->flex_nodenum[f];
@@ -1396,4 +1478,86 @@ int mj_effActuatorPossible(const mjModel* m, int i) {
          m->actuator_gaintype[i] == mjGAIN_SO3     ||
          m->actuator_gaintype[i] == mjGAIN_MUSCLE  ||
          m->actuator_gaintype[i] == mjGAIN_DCMOTOR;
+}
+
+
+//-------------------------- Stable Neo-Hookean tetrahedra -----------------------------------------
+
+// cubic Gram determinant P(s) = a*b*c + 2*d*e*f - a*f*f - b*e*e - c*d*d,
+// where D(s) = [[a,d,e], [d,b,f], [e,f,c]] is the Gram difference at vertex 0.
+// Add its derivatives to the same edge tension/metric used for the quadratic energy.
+void mj_snhCubic(mjtNum metric[36], mjtNum tension[6], const mjtNum s[6],
+                 mjtNum gamma, int flg_stiffness) {
+  mjtNum a = s[0], b = s[2], c = s[4];
+  mjtNum d = 0.5 * (s[0] + s[2] - s[1]);
+  mjtNum e = 0.5 * (s[0] + s[4] - s[5]);
+  mjtNum f = 0.5 * (s[2] + s[4] - s[3]);
+  mjtNum cof[6] = {b*c-f*f, a*c-e*e, a*b-d*d, e*f-c*d, d*f-b*e, d*e-a*f};
+  mjtNum g[6] = {cof[0]+cof[3]+cof[4], -cof[3], cof[1]+cof[3]+cof[5],
+                 -cof[5], cof[2]+cof[4]+cof[5], -cof[4]};
+  mju_addToScl(tension, g, 2*gamma, 6);
+  if (!flg_stiffness) return;
+
+  // columns of the constant map s -> (a,b,c,d,e,f)
+  static const mjtNum basis[6][6] = {
+    {1, 0, 0, .5, .5, 0}, {0, 0, 0, -.5, 0, 0},
+    {0, 1, 0, .5, 0, .5}, {0, 0, 0, 0, 0, -.5},
+    {0, 0, 1, 0, .5, .5}, {0, 0, 0, 0, -.5, 0}
+  };
+  for (int j = 0; j < 6; j++) {
+    const mjtNum* h = basis[j];
+    mjtNum dc[6] = {
+      h[1]*c+b*h[2]-2*f*h[5], h[0]*c+a*h[2]-2*e*h[4],
+      h[0]*b+a*h[1]-2*d*h[3], h[4]*f+e*h[5]-h[2]*d-c*h[3],
+      h[3]*f+d*h[5]-h[1]*e-b*h[4], h[3]*e+d*h[4]-h[0]*f-a*h[5]
+    };
+    mjtNum dg[6] = {dc[0]+dc[3]+dc[4], -dc[3], dc[1]+dc[3]+dc[5],
+                    -dc[5], dc[2]+dc[4]+dc[5], -dc[4]};
+    for (int i = 0; i <= j; i++) {
+      mjtNum value = 2*gamma*dg[i];
+      metric[6*i+j] += value;
+      if (i != j) metric[6*j+i] += value;
+    }
+  }
+}
+
+
+// exact Hessian-vector product of the quadratic, cubic, and signed-volume energies
+void mj_snhStiffnessMul(mjtNum result[4][3], const mjtNum metric[36], const mjtNum tension[6],
+                        mjtNum edgevec[6][3], mjtNum grad[4][3], mjtNum pressure,
+                        const mjtNum k[24], mjtNum vec[4][3], mjtNum scale) {
+  const int (*edge)[2] = mj_stretchEdges[1];
+  mjtNum delta[6][3], edgeforce[6][3];
+  for (int e = 0; e < 6; e++) {
+    mju_sub3(delta[e], vec[edge[e][0]], vec[edge[e][1]]);
+  }
+  mj_stretchStiffnessMul(edgeforce, metric, tension, edgevec, delta, 6, scale);
+  mju_zero(result[0], 12);
+  for (int e = 0; e < 6; e++) {
+    mju_addTo3(result[edge[e][0]], edgeforce[e]);
+    mju_subFrom3(result[edge[e][1]], edgeforce[e]);
+  }
+
+  // differentiate the three cross products in grad(J), without forming a 12x12 matrix
+  mjtNum dg[4][3], tmp[3];
+  mju_cross(dg[1], delta[4], edgevec[2]);
+  mju_cross(tmp, edgevec[4], delta[2]);
+  mju_addTo3(dg[1], tmp);
+  mju_cross(dg[2], delta[4], edgevec[0]);
+  mju_cross(tmp, edgevec[4], delta[0]);
+  mju_addTo3(dg[2], tmp);
+  mju_cross(dg[3], delta[2], edgevec[0]);
+  mju_cross(tmp, edgevec[2], delta[0]);
+  mju_addTo3(dg[3], tmp);
+  for (int x = 0; x < 3; x++) {
+    dg[0][x] = -dg[1][x]-dg[2][x]-dg[3][x];
+  }
+  mjtNum dJ = 0;
+  for (int v = 0; v < 4; v++) {
+    dJ += mju_dot3(grad[v], vec[v]);
+  }
+  for (int v = 0; v < 4; v++) {
+    mju_addToScl3(result[v], grad[v], 2*scale*k[22]*dJ);
+    mju_addToScl3(result[v], dg[v], scale*pressure*k[23]);
+  }
 }

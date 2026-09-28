@@ -704,6 +704,7 @@ class mjCJoint : public mjCJoint_, private mjsJoint {
   friend class mjCDef;
   friend class mjCEquality;
   friend class mjCBody;
+  friend class mjCFlex;
   friend class mjCModel;
   friend class mjCSensor;
   friend class mjXWriter;
@@ -1002,7 +1003,6 @@ class mjCFlex_ : public mjCBase {
   std::vector<std::pair<int, int>> edge;          // edge vertex ids
   std::vector<int>                 shell;         // shell fragment vertex ids (dim per fragment)
   std::vector<int>                 elemlayer;     // element layer (distance from border)
-  std::vector<int>                 evpair;        // element-vertex pairs
   std::vector<StencilFlap>         flaps;         // adjacent triangles
   std::vector<double>              vertxpos;      // global vertex positions
   mjCBoundingVolumeHierarchy       tree;          // bounding volume hierarchy
@@ -1074,9 +1074,10 @@ class mjCFlex : public mjCFlex_, private mjsFlex {
 
 
  private:
+  bool IsSimple() const;           // fixed or independent XYZ-slide attachments
   void Compile(const mjVFS* vfs);  // compiler
   void CreateBVH(void);            // create flex BVH
-  void CreateShellPair(void);      // create shells and evpairs
+  void CreateShell(void);          // create shells
   void ComputeCellEmpty(const double* vpos,
                         const int*    elems,  // identify cells
                         int           nv,
