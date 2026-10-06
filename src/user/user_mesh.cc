@@ -205,9 +205,9 @@ mjCMesh::mjCMesh(mjCModel* _model, mjCDef* _def) {
   center_       = nullptr;
   graph_        = nullptr;
   needhull_     = false;
+  needsdf_      = false;
   maxhullvert_  = -1;
   processed_    = false;
-  visual_       = true;
   needreorient_ = true;
 
   // reset to default if given
@@ -282,10 +282,6 @@ void mjCMesh::PointToLocal() {
 
 
 void mjCMesh::NameSpace(const mjCModel* m) {
-  if (name.empty()) {
-    std::string stripped = mjuu_strippath(spec_file_);
-    name                 = mjuu_stripext(stripped);
-  }
   mjCBase::NameSpace(m);
   if (!plugin_instance_name.empty()) {
     plugin_instance_name = m->prefix + plugin_instance_name + m->suffix;
@@ -316,12 +312,6 @@ void mjCMesh::CopyFromSpec() {
   szgraph_ = 0;
   center_  = nullptr;
   graph_   = nullptr;
-
-  // use filename if name is missing
-  if (name.empty()) {
-    std::string stripped = mjuu_strippath(file_);
-    name                 = mjuu_stripext(stripped);
-  }
 }
 
 
@@ -364,8 +354,10 @@ void mjCMesh::LoadSDF() {
   std::vector<const char*> names(pplugin->nattribute, 0);
   std::vector<const char*> values(pplugin->nattribute, 0);
   for (int i = 0; i < pplugin->nattribute; i++) {
+    // an attribute which is not configured is empty, and is not added to the configuration
     names[i]  = pplugin->attributes[i];
-    values[i] = plugin_instance->config_attribs[names[i]].c_str();
+    auto it   = plugin_instance->config_attribs.find(names[i]);
+    values[i] = it != plugin_instance->config_attribs.end() ? it->second.c_str() : "";
   }
 
   if (pplugin->sdf_attribute) {
@@ -421,6 +413,7 @@ void mjCMesh::LoadSDF() {
 
   needreorient_ = false;
   needsdf       = false;
+  needsdf_      = false;
   normal_       = std::move(usernormal);
   face_         = std::move(userface);
   ProcessVertices(uservert);
@@ -662,7 +655,6 @@ void mjCMesh::TryCompile(const mjVFS* vfs) {
 
   bool fromCache = false;
   CopyFromSpec();
-  visual_         = true;
   mjCCache* cache = reinterpret_cast<mjCCache*>(mj_getCache()->impl_);
 
   Clock::time_point t0 = Clock::now();
@@ -750,7 +742,7 @@ void mjCMesh::TryCompile(const mjVFS* vfs) {
     // we need to compute it here. If inversely it has an octree but we *do not*
     // need one, we clear it.
     t0 = Clock::now();
-    if (!needsdf) {
+    if (!needsdf && !needsdf_) {
       octree_.Clear();
     } else if (octree_.NumNodes() == 0) {
       std::vector<double> dvert(vert_.begin(), vert_.end());
@@ -876,11 +868,6 @@ void mjCMesh::CopyPolygonNormals(mjtNum* arr) {
     arr[i + 1] = (mjtNum)polygon_normals_[i + 1];
     arr[i + 2] = (mjtNum)polygon_normals_[i + 2];
   }
-}
-
-
-void mjCMesh::DelTexcoord() {
-  texcoord_.clear();
 }
 
 
@@ -1485,7 +1472,7 @@ void mjCMesh::Process() {
 
   t0 = Clock::now();
   // make octree
-  if (needsdf) {
+  if (needsdf || needsdf_) {
     octree_.SetFace(dvert, face_);
     octree_.SetMaxDepth(spec.octree_maxdepth);
     octree_.CreateOctree(aamm_);
@@ -2898,11 +2885,6 @@ void mjCSkin::PointToLocal() {
 
 
 void mjCSkin::NameSpace(const mjCModel* m) {
-  // use filename if name is missing
-  if (name.empty()) {
-    std::string stripped = mjuu_strippath(spec_file_);
-    name                 = mjuu_stripext(stripped);
-  }
   for (auto& name : spec_bodyname_) { name = m->prefix + name + m->suffix; }
 }
 
@@ -2919,12 +2901,6 @@ void mjCSkin::CopyFromSpec() {
   bindquat_                    = spec_bindquat_;
   vertid_                      = spec_vertid_;
   vertweight_                  = spec_vertweight_;
-
-  // use filename if name is missing
-  if (name.empty()) {
-    std::string stripped = mjuu_strippath(file_);
-    name                 = mjuu_stripext(stripped);
-  }
 }
 
 
@@ -3028,11 +3004,10 @@ void mjCSkin::Compile(const mjVFS* vfs) {
 
   // resolve material name
   mjCBase* pmat = model->FindObject(mjOBJ_MATERIAL, material_);
-  if (pmat) {
-    matid = pmat->id;
-  } else if (!material_.empty()) {
+  if (!pmat && !material_.empty()) {
     throw mjCError(this, "unknown material '%s' in skin", material_.c_str());
   }
+  matid = pmat ? pmat->id : -1;
 
   // set total vertex weights to 0
   std::vector<float> vw;
@@ -3555,8 +3530,11 @@ static void CreateFlapStencil(std::vector<StencilFlap>& flaps,
 
       if (inserted) {
         StencilFlap flap;
-        flap.vertices[0] = v[edge[e][0]];
-        flap.vertices[1] = v[edge[e][1]];
+        // store the edge vertices in the same (min, max) order as the edge
+        // pair: the engine applies the bending coefficients, which depend on
+        // this order, to the vertices listed in flex_edge
+        flap.vertices[0] = pair.first;
+        flap.vertices[1] = pair.second;
         flap.vertices[2] = v[(edge[e][1] + 1) % 3];
         flap.vertices[3] = -1;
         flaps.push_back(flap);
@@ -3674,8 +3652,8 @@ void quadratureGaussLegendre(
     weights[1] = dpdx;
   } else {
     points[0]  = p0;
-    points[1]  = -dpdx / sqrt(3. / 5.) + p0;
-    points[2]  = dpdx / sqrt(3. / 5.) + p0;
+    points[1]  = -dpdx * sqrt(3. / 5.) + p0;
+    points[2]  = dpdx * sqrt(3. / 5.) + p0;
     weights[0] = 8. / 9. * dpdx;
     weights[1] = 5. / 9. * dpdx;
     weights[2] = 5. / 9. * dpdx;
@@ -3806,7 +3784,7 @@ void inline ComputeLinearStiffness(
         }
 
         // tensor contraction of the gradients of elastic strains
-        // (d(F+F')/dx : d(F+F')/dx)
+        // lambda * div(u) * div(v) + 2*mu * sym(grad(u)) : sym(grad(v))
         for (int i = 0; i < n; i++) {
           for (int j = 0; j < n; j++) {
             Matrix du;
@@ -3822,7 +3800,7 @@ void inline ComputeLinearStiffness(
                 dv[l][1]                           = invJ[1] * F[j][1];
                 dv[l][2]                           = invJ[2] * F[j][2];
                 K[ndof * (3 * i + k) + 3 * j + l] -= la * trace(du) * trace(dv) * dvol;
-                K[ndof * (3 * i + k) + 3 * j + l] -= mu * trace(inner(sym(du), sym(dv))) * dvol;
+                K[ndof * (3 * i + k) + 3 * j + l] -= 2 * mu * trace(inner(sym(du), sym(dv))) * dvol;
                 mjuu_zerovec(du[k].data(), 3);
                 mjuu_zerovec(dv[l].data(), 3);
               }
@@ -3916,8 +3894,7 @@ void inline ComputeLinearStiffness2D(std::vector<double>& K,
               dv[l][axis1] = invJ1 * F[j][1];
 
               K[ndof * (3 * i + k) + 3 * j + l] -= la * trace(du) * trace(dv) * dvol;
-              // mu (not 2*mu): same convention as 3D ComputeLinearStiffness
-              K[ndof * (3 * i + k) + 3 * j + l] -= mu * trace(inner(sym(du), sym(dv))) * dvol;
+              K[ndof * (3 * i + k) + 3 * j + l] -= 2 * mu * trace(inner(sym(du), sym(dv))) * dvol;
               mjuu_zerovec(du[k].data(), 3);
               mjuu_zerovec(dv[l].data(), 3);
             }
@@ -4184,11 +4161,6 @@ bool mjCFlex::HasTexcoord() const {
 }
 
 
-void mjCFlex::DelTexcoord() {
-  texcoord_.clear();
-}
-
-
 void mjCFlex::ResolveReferences(const mjCModel* m) {
   interpolated = !nodebody_.empty();
   vertbodyid.clear();
@@ -4396,8 +4368,7 @@ static void ComputeInterpBending(std::vector<double>&       bending,
   face_cumul[0] = 0;
   for (int f = 1; f < 6; f++) { face_cumul[f] = face_cumul[f - 1] + face_sizes[f - 1]; }
 
-  int face_count0[6];
-  for (int f = 0; f < 6; f++) { face_count0[f] = face_sizes[f] / face_count1[f]; }
+  int face_count0[6] = {cy, cy, cz, cz, cx, cx};
 
   int cells[3] = {cx, cy, cz};
 
@@ -4599,6 +4570,9 @@ void mjCFlex::Compile(const mjVFS* vfs) {
   if (elastic3d == 1 && (dim != 3 || interpolated)) {
     throw mjCError(this, "stable Neo-Hookean elasticity requires a non-interpolated 3d flex");
   }
+  if (elastic3d == 1 && model->option.integrator != mjINT_DISCRETE) {
+    throw mjCError(this, "stable Neo-Hookean elasticity requires integrator='discrete'");
+  }
 
   // set nvert, rigid, centered; check size
   if (vert_.empty()) {
@@ -4657,11 +4631,10 @@ void mjCFlex::Compile(const mjVFS* vfs) {
 
   // resolve material name
   mjCBase* pmat = model->FindObject(mjOBJ_MATERIAL, material_);
-  if (pmat) {
-    matid = pmat->id;
-  } else if (!material_.empty()) {
+  if (!pmat && !material_.empty()) {
     throw mjCError(this, "unknown material '%s' in flex", material_.c_str());
   }
+  matid = pmat ? pmat->id : -1;
 
   // resolve body ids
   ResolveReferences(model);

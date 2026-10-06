@@ -101,19 +101,23 @@ int mj_maxContact(const mjModel* m, int g1, int g2, int has_margin) {
     return 4;
   }
 
+  // geoms with flat faces
+  int hasface1 = (type1 == mjGEOM_BOX || type1 == mjGEOM_MESH || type1 == mjGEOM_CYLINDER);
+  int hasface2 = (type2 == mjGEOM_BOX || type2 == mjGEOM_MESH || type2 == mjGEOM_CYLINDER);
+
+  // geoms with only edges
+  int hasedge1 = (type1 == mjGEOM_CAPSULE);
+  int hasedge2 = (type2 == mjGEOM_CAPSULE);
+
   // the remaining plane cases
   if (type1 == mjGEOM_PLANE || type2 == mjGEOM_PLANE) {
-    int type = (type1 == mjGEOM_PLANE) ? type2 : type1;
-    switch (type) {
-      case mjGEOM_CAPSULE:
-        return 2;
-      case mjGEOM_CYLINDER:
-      case mjGEOM_BOX:
-      case mjGEOM_MESH:
-        return 4;
-      default:
-        return 0;
+    if (hasface1 || hasface2) {
+      return 4;
     }
+    if (hasedge1 || hasedge2) {
+      return 2;
+    }
+    return 0;
   }
 
   int is_multiccd = !mjDISABLED(mjDSBL_MULTICCD);
@@ -121,12 +125,8 @@ int mj_maxContact(const mjModel* m, int g1, int g2, int has_margin) {
     return 1;
   }
 
-  if (type1 == mjGEOM_CAPSULE || type2 == mjGEOM_CAPSULE) {
-    return 5;
-  }
-
   if (mjDISABLED(mjDSBL_NATIVECCD)) {
-    return is_multiccd ? 5 : 1;  // mesh-mesh or mesh-box with libccd
+    return 5;
   }
 
   // check margin from model
@@ -153,8 +153,21 @@ int mj_maxContact(const mjModel* m, int g1, int g2, int has_margin) {
     }
   }
 
-  // 4 contacts for box, cylinder, and mesh collisions without margins, 5 with margins
-  return has_margin ? 5 : 4;
+  if (has_margin) {
+    return 5;
+  }
+
+  // colliding geoms with flat faces
+  if (hasface1 && hasface2) {
+    return 4;
+  }
+
+  // colliding geoms with edges
+  if ((hasedge1 && hasface2) || (hasface1 && hasedge2) || (hasedge1 && hasedge2)) {
+    return 2;
+  }
+
+  return 1;
 }
 
 
@@ -341,6 +354,19 @@ static int canCollide2(const mjModel* m, int bf1, int bf2) {
 
   // opposite of bitmask filter
   return (!filterBitmask(contype1, conaffinity1, contype2, conaffinity2));
+}
+
+
+// return 1 if bodyflex has dofs and they are awake, 0 otherwise
+static int hasAwakeDofs(const mjModel* m, const mjData* d, int bf, int sleep_filter) {
+  // body
+  if (bf < m->nbody) {
+    return m->body_treeid[bf] >= 0 && (!sleep_filter || d->body_awake[bf] == mjS_AWAKE);
+  }
+
+  // flex: static if none of its vertices (or nodes) are in a body with dofs
+  mjtSleepState state = mj_sleepState(m, d, mjOBJ_FLEX, bf - m->nbody);
+  return state != mjS_STATIC && (!sleep_filter || state == mjS_AWAKE);
 }
 
 
@@ -699,8 +725,8 @@ void mj_collision(const mjModel* m, mjData* d) {
 
     // process bodyflex pair: all-to-all
     else {
-      int geomadr_end1 = geomadr1 + m->body_geomnum[bf1];
-      int geomadr_end2 = geomadr2 + m->body_geomnum[bf2];
+      int geomadr_end1 = (isbody1 ? geomadr1 + m->body_geomnum[bf1] : -1);
+      int geomadr_end2 = (isbody2 ? geomadr2 + m->body_geomnum[bf2] : -1);
 
       // body : body
       if (isbody1 && isbody2) {
@@ -748,7 +774,9 @@ void mj_collision(const mjModel* m, mjData* d) {
           // collide geom with flex elements
           int elemnum = m->flex_elemnum[f];
           for (int e=0; e < elemnum; e++) {
-            ncandidate = pushGeomElem(d, g, f, e, group, ncandidate);
+            if (mj_isElemActive(m, f, e)) {
+              ncandidate = pushGeomElem(d, g, f, e, group, ncandidate);
+            }
           }
         }
       }
@@ -761,8 +789,12 @@ void mj_collision(const mjModel* m, mjData* d) {
 
         // collide elements of two flexes
         for (int e1=0; e1 < m->flex_elemnum[f1]; e1++) {
-          for (int e2=0; e2 < m->flex_elemnum[f2]; e2++) {
-            ncandidate = pushElemElem(d, f1, e1, f2, e2, group, ncandidate);
+          if (mj_isElemActive(m, f1, e1)) {
+            for (int e2=0; e2 < m->flex_elemnum[f2]; e2++) {
+              if (mj_isElemActive(m, f2, e2)) {
+                ncandidate = pushElemElem(d, f1, e1, f2, e2, group, ncandidate);
+              }
+            }
           }
         }
       }
@@ -781,8 +813,8 @@ void mj_collision(const mjModel* m, mjData* d) {
   // flex self-collisions
   for (int f=0; f < m->nflex; f++) {
     if (!m->flex_rigid[f] && (m->flex_contype[f] & m->flex_conaffinity[f])) {
-      // skip if flex is asleep
-      if (sleep_filter && mj_sleepState(m, d, mjOBJ_FLEX, f) == mjS_ASLEEP) continue;
+      // skip if flex has no dofs or is asleep
+      if (!hasAwakeDofs(m, d, nbody+f, sleep_filter)) continue;
       // under the ipc flag the IPC step resolves a dim-2 flex's self-contact itself
       if (mjc_ipcOwnsFlexFlex(m, f, f)) continue;
 
@@ -1564,9 +1596,9 @@ static int mj_broadphase(const mjModel* m, mjData* d, mjPacked32* bfpair, int ma
         add_pair(m, b1, b2, &npair, bfpair, maxpair);
       }
 
-      // add body:flex pairs, skip if flex asleep
+      // add body:flex pairs, skip if flex has no dofs (like b1) or is asleep
       for (int f=0; f < nflex; f++) {
-        if (sleep_filter && mj_sleepState(m, d, mjOBJ_FLEX, f) == mjS_ASLEEP) continue;
+        if (!hasAwakeDofs(m, d, nbody+f, sleep_filter)) continue;
         add_pair(m, b1, nbody+f, &npair, bfpair, maxpair);
       }
     }
@@ -1664,13 +1696,11 @@ static int mj_broadphase(const mjModel* m, mjData* d, mjPacked32* bfpair, int ma
         }
       }
 
-      // flex pair: skip if neither side is dynamically awake
-      else if (sleep_filter) {
-        int awake1 = (bf1 >= nbody) ? mj_sleepState(m, d, mjOBJ_FLEX, bf1-nbody) == mjS_AWAKE
-                                    : d->body_awake[bf1] == mjS_AWAKE && m->body_treeid[bf1] >= 0;
-        int awake2 = (bf2 >= nbody) ? mj_sleepState(m, d, mjOBJ_FLEX, bf2-nbody) == mjS_AWAKE
-                                    : d->body_awake[bf2] == mjS_AWAKE && m->body_treeid[bf2] >= 0;
-        if (!awake1 && !awake2) continue;
+      // flex pair: skip if neither side has awake dofs
+      // (smaller id first: a body is cheaper to test than a flex)
+      else if (!hasAwakeDofs(m, d, mjMIN(bf1, bf2), sleep_filter) &&
+               !hasAwakeDofs(m, d, mjMAX(bf1, bf2), sleep_filter)) {
+        continue;
       }
 
       // add bodyflex pair if there is room in buffer

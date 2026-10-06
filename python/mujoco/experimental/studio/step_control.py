@@ -30,12 +30,9 @@ class StepControl:
   def __init__(self) -> None:
     self.step_control = sim.StepControl()
 
-  @messages.handler(priority=messages.Priority.LIBRARY)
-  def _on_model(self, event: messages.ModelEvent) -> None:
+  @messages.handler(priority=messages.Priority.INTERNAL)
+  def _on_post_model(self, event: messages.PostModelEvent) -> None:
     del event
-    # Fresh step control so the new model starts time-synchronized. Runs at
-    # LIBRARY priority, before ViewerHandle swaps model/data and consumes the
-    # event at INTERNAL priority.
     self.step_control = sim.StepControl()
 
   @messages.handler(priority=messages.Priority.INTERNAL)
@@ -44,6 +41,16 @@ class StepControl:
     sc.set_pause_state(event.pause_state)
     sc.set_speed(event.speed)
     sc.set_noise_parameters(event.noise_scale, event.noise_rate)
+    return True
+
+  @messages.handler(priority=messages.Priority.INTERNAL)
+  def _on_single_step(self, _: messages.SingleStepEvent) -> bool:
+    self.step_control.request_single_step()
+    return True
+
+  @messages.handler(priority=messages.Priority.INTERNAL)
+  def _on_pause(self, event: messages.RequestPauseEvent) -> bool:
+    self.step_control.set_pause_state(event.pause_state)
     return True
 
   @messages.handler(priority=messages.Priority.INTERNAL)

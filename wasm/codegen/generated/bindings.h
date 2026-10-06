@@ -2271,6 +2271,18 @@ struct MjsCompiler {
   void set_saveinertial(mjtBool value) {
     ptr_->saveinertial = value;
   }
+  mjtBool savecompiled() const {
+    return ptr_->savecompiled;
+  }
+  void set_savecompiled(mjtBool value) {
+    ptr_->savecompiled = value;
+  }
+  mjtBool savecanonical() const {
+    return ptr_->savecanonical;
+  }
+  void set_savecanonical(mjtBool value) {
+    ptr_->savecanonical = value;
+  }
   mjtBool alignfree() const {
     return ptr_->alignfree;
   }
@@ -6248,6 +6260,12 @@ struct MjsBody {
   void set_simple(mjtByte value) {
     ptr_->simple = value;
   }
+  mjtByte fuse() const {
+    return ptr_->fuse;
+  }
+  void set_fuse(mjtByte value) {
+    ptr_->fuse = value;
+  }
   mjDoubleVec &userdata() const {
     return *(ptr_->userdata);
   }
@@ -7032,6 +7050,15 @@ struct MjData {
   }
   emscripten::val flexelem_krot() const {
     return emscripten::val(emscripten::typed_memory_view(model->nflexstiffness, ptr_->flexelem_krot));
+  }
+  emscripten::val flex_hessian_valid() const {
+    return emscripten::val(emscripten::typed_memory_view(model->nflex, reinterpret_cast<uint8_t*>(ptr_->flex_hessian_valid)));
+  }
+  emscripten::val flexvert_hessian() const {
+    return emscripten::val(emscripten::typed_memory_view(model->nflexvert * 6, ptr_->flexvert_hessian));
+  }
+  emscripten::val flexedge_hessian() const {
+    return emscripten::val(emscripten::typed_memory_view(model->nflexedge * 9, ptr_->flexedge_hessian));
   }
   emscripten::val flexedge_J() const {
     return emscripten::val(emscripten::typed_memory_view(model->nJfe, ptr_->flexedge_J));

@@ -6164,6 +6164,30 @@ STRUCTS: Mapping[str, StructDecl] = dict([
                  array_extent=('nflexstiffness',),
              ),
              StructFieldDecl(
+                 name='flex_hessian_valid',
+                 type=PointerType(
+                     inner_type=ValueType(name='mjtBool'),
+                 ),
+                 doc='Cartesian stretch Hessian cache is current',
+                 array_extent=('nflex',),
+             ),
+             StructFieldDecl(
+                 name='flexvert_hessian',
+                 type=PointerType(
+                     inner_type=ValueType(name='mjtNum'),
+                 ),
+                 doc='symmetric diagonal Hessian blocks',
+                 array_extent=('nflexvert', 6),
+             ),
+             StructFieldDecl(
+                 name='flexedge_hessian',
+                 type=PointerType(
+                     inner_type=ValueType(name='mjtNum'),
+                 ),
+                 doc='oriented off-diagonal Hessian blocks',
+                 array_extent=('nflexedge', 9),
+             ),
+             StructFieldDecl(
                  name='flexedge_J',
                  type=PointerType(
                      inner_type=ValueType(name='mjtNum'),
@@ -7274,7 +7298,7 @@ STRUCTS: Mapping[str, StructDecl] = dict([
              StructFieldDecl(
                  name='settotalmass',
                  type=ValueType(name='double'),
-                 doc='rescale masses and inertias; <=0: ignore',
+                 doc='(deprecated) rescale masses and inertias; <=0: ignore',
              ),
              StructFieldDecl(
                  name='balanceinertia',
@@ -7331,6 +7355,16 @@ STRUCTS: Mapping[str, StructDecl] = dict([
                  name='saveinertial',
                  type=ValueType(name='mjtBool'),
                  doc='save explicit inertial clause for all bodies to XML',
+             ),
+             StructFieldDecl(
+                 name='savecompiled',
+                 type=ValueType(name='mjtBool'),
+                 doc='save values as compiled, not as written in the spec',
+             ),
+             StructFieldDecl(
+                 name='savecanonical',
+                 type=ValueType(name='mjtBool'),
+                 doc='save quaternions and radians, not the notation of the spec',  # pylint: disable=line-too-long
              ),
              StructFieldDecl(
                  name='alignfree',
@@ -7755,6 +7789,11 @@ STRUCTS: Mapping[str, StructDecl] = dict([
                  name='simple',
                  type=ValueType(name='mjtByte'),
                  doc='simple body optimization (0: false, 1: auto)',
+             ),
+             StructFieldDecl(
+                 name='fuse',
+                 type=ValueType(name='mjtByte'),
+                 doc='fuse with parent when static (0: false, 1: auto)',
              ),
              StructFieldDecl(
                  name='userdata',

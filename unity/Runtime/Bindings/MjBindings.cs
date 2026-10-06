@@ -118,7 +118,7 @@ public const int mjMAXLINEPNT = 1001;
 public const int mjMAXPLANEGRID = 200;
 public const bool THIRD_PARTY_MUJOCO_MJXMACRO_H_ = true;
 public const bool THIRD_PARTY_MUJOCO_MUJOCO_H_ = true;
-public const int mjVERSION_HEADER = 3014001;
+public const int mjVERSION_HEADER = 3015001;
 
 
 // ------------------------------------Enums------------------------------------
@@ -5791,6 +5791,9 @@ public unsafe struct mjData_ {
   public double* flexvert_xpos;
   public double* flexelem_aabb;
   public double* flexelem_krot;
+  public byte* flex_hessian_valid;
+  public double* flexvert_hessian;
+  public double* flexedge_hessian;
   public double* flexedge_J;
   public double* flexedge_length;
   public double* flexvert_J;
@@ -5943,6 +5946,8 @@ public unsafe struct mjsCompiler_ {
   public mjtInertiaFromGeom inertiafromgeom;
   public fixed int inertiagrouprange[2];
   public byte saveinertial;
+  public byte savecompiled;
+  public byte savecanonical;
   public byte alignfree;
   public mjtConflict conflict;
   public mjLROpt_ LRopt;
@@ -6820,13 +6825,13 @@ public static unsafe extern void mj_defaultVisual(mjVisual_* vis);
 public static unsafe extern mjModel_* mj_copyModel(mjModel_* dest, mjModel_* src);
 
 [DllImport("mujoco", CallingConvention = CallingConvention.Cdecl)]
-public static unsafe extern void mj_saveModel(mjModel_* m, [MarshalAs(UnmanagedType.LPStr)]string filename, void* buffer, int buffer_sz);
+public static unsafe extern void mj_saveModel(mjModel_* m, [MarshalAs(UnmanagedType.LPStr)]string filename, void* buffer, UInt64 buffer_sz);
 
 [DllImport("mujoco", CallingConvention = CallingConvention.Cdecl)]
 public static unsafe extern mjModel_* mj_loadModel([MarshalAs(UnmanagedType.LPStr)]string filename, void* vfs);
 
 [DllImport("mujoco", CallingConvention = CallingConvention.Cdecl)]
-public static unsafe extern mjModel_* mj_loadModelBuffer(void* buffer, int buffer_sz);
+public static unsafe extern mjModel_* mj_loadModelBuffer(void* buffer, UInt64 buffer_sz);
 
 [DllImport("mujoco", CallingConvention = CallingConvention.Cdecl)]
 public static unsafe extern void mj_deleteModel(mjModel_* m);

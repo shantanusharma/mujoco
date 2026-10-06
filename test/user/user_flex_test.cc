@@ -67,6 +67,7 @@ TEST_F(UserFlexTest, SNHSpecOnly) {
 
   // Recompilation and spec copying retain the programmatic selection.
   flex->elastic3d = 1;
+  spec->option.integrator = mjINT_DISCRETE;
   SpecPtr copy(mj_copySpec(spec.get()), mj_deleteSpec);
   ASSERT_THAT(copy.get(), NotNull());
   EXPECT_EQ(
@@ -218,6 +219,39 @@ TEST_F(UserFlexTest, SNHRequiresStandard3D) {
                 HasSubstr("requires a non-interpolated 3d flex"));
     mj_deleteSpec(spec);
   }
+}
+
+TEST_F(UserFlexTest, SNHRequiresDiscreteIntegrator) {
+  static constexpr char xml[] = R"(
+  <mujoco>
+    <worldbody>
+      <flexcomp name="test" dim="3" count="2 2 2">
+        <contact contype="0" conaffinity="0" selfcollide="none"/>
+        <elasticity young="1000"/>
+      </flexcomp>
+    </worldbody>
+  </mujoco>)";
+  mjSpec* spec = mj_parseXMLString(xml, nullptr, nullptr, 0);
+  ASSERT_THAT(spec, NotNull());
+  mjs_asFlex(mjs_findElement(spec, mjOBJ_FLEX, "test"))->elastic3d = 1;
+  for (int integrator :
+       {mjINT_EULER, mjINT_RK4, mjINT_IMPLICIT, mjINT_IMPLICITFAST}) {
+    SCOPED_TRACE(integrator);
+    spec->option.integrator = integrator;
+    MjModelPtr m(mj_compile(spec, nullptr));
+    EXPECT_THAT(m.get(), IsNull());
+    EXPECT_THAT(
+        mjs_getError(spec),
+        HasSubstr(
+            "stable Neo-Hookean elasticity requires integrator='discrete'"));
+  }
+  spec->option.integrator = mjINT_DISCRETE;
+  for (int solver : {mjSOL_CG, mjSOL_NEWTON}) {
+    spec->option.solver = solver;
+    MjModelPtr m(mj_compile(spec, nullptr));
+    EXPECT_THAT(m.get(), NotNull()) << mjs_getError(spec);
+  }
+  mj_deleteSpec(spec);
 }
 
 TEST_F(UserFlexTest, ParentMustHaveName) {
@@ -1695,6 +1729,34 @@ TEST_F(UserFlexTest, PinBendingAcceptsStaticBody) {
   std::array<char, 1024> error;
   MjModelPtr m = LoadModelFromString(xml, error.data(), error.size());
   EXPECT_THAT(m.get(), NotNull()) << error.data();
+}
+
+TEST_F(UserFlexTest, FlatIrregularHingeHasNoRestBendingForce) {
+  // The first triangle traverses the shared edge as 1->0, opposite to the
+  // (min, max) order of flex_edge. The triangles are not mirror images, so
+  // applying the bending coefficients to swapped edge vertices would produce a
+  // nonzero force in the flat rest configuration.
+  static constexpr char xml[] = R"(
+  <mujoco>
+  <worldbody>
+    <flexcomp name="test" type="direct" dim="2" radius="0.01"
+              point="0 0 0  1 0 0  0.3 0.8 0  0.6 -0.7 0"
+              element="1 0 2  0 1 3">
+      <contact selfcollide="none"/>
+      <elasticity young="1e4" poisson="0" thickness="0.1" elastic2d="bend"/>
+    </flexcomp>
+  </worldbody>
+  </mujoco>
+  )";
+  std::array<char, 1024> error;
+  MjModelPtr m = LoadModelFromString(xml, error.data(), error.size());
+  ASSERT_THAT(m.get(), NotNull()) << error.data();
+  ASSERT_GE(m->flex_bendingadr[0], 0);
+  MjDataPtr d = MakeData(m);
+  mj_forward(m.get(), d.get());
+  for (int i = 0; i < m->nv; i++) {
+    EXPECT_NEAR(d->qfrc_spring[i], 0, MjTol(1e-10, 1e-5)) << "dof " << i;
+  }
 }
 
 TEST_F(UserFlexTest, FlexConstraintsAndElasticityError) {

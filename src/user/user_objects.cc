@@ -129,18 +129,54 @@ PNGImage PNGImage::Load(const mjCBase* obj, mjResource* resource, LodePNGColorTy
   return image;
 }
 
-// associate all child list elements with a frame and copy them to parent list, clear child list
+// associate all child list elements with a frame and copy them to parent list, clear child list;
+// elements that are already in a frame stay in it
 template <typename T>
 void MapFrame(std::vector<T*>& parent,
               std::vector<T*>& child,
               mjCFrame*        frame,
               mjCBody*         parent_body) {
   std::for_each(child.begin(), child.end(), [frame, parent_body](T* element) {
-    element->SetFrame(frame);
-    element->SetParent(parent_body);
+    element->SetParent(parent_body);  // needs to happen first, SetFrame checks the parent
+    if (!element->frame) { element->SetFrame(frame); }
   });
   parent.insert(parent.end(), child.begin(), child.end());
   child.clear();
+}
+
+// express a pose given in a frame in the coordinates of the body holding the frame, using the
+// specs of the frame and of its ancestors, which need not be compiled
+void FrameToBody(const mjCFrame* frame, double pos[3], double quat[4]) {
+  for (; frame; frame = frame->frame) {
+    double framequat[4];
+    mjuu_copyvec(framequat, frame->spec.quat, 4);
+    const char* err = ResolveOrientation(framequat,
+                                         frame->compiler->degree,
+                                         frame->compiler->eulerseq,
+                                         frame->spec.alt);
+    if (err) { throw mjCError(frame, "orientation specification error '%s' in frame", err); }
+    mjuu_normvec(framequat, 4);
+    mjuu_frameaccumChild(frame->spec.pos, framequat, pos, quat);
+  }
+}
+
+// rotate an inertia matrix, given as (xx, yy, zz, xy, xz, yz)
+void RotateInertia(double res[6], const double inert[6], const double quat[4]) {
+  double mat[9], full[9], rotated[9];
+  full[0] = inert[0];
+  full[4] = inert[1];
+  full[8] = inert[2];
+  full[1] = full[3] = inert[3];
+  full[2] = full[6] = inert[4];
+  full[5] = full[7] = inert[5];
+  mjuu_quat2mat(mat, quat);
+  mjuu_mulRMRT(rotated, mat, full);
+  res[0] = rotated[0];
+  res[1] = rotated[4];
+  res[2] = rotated[8];
+  res[3] = rotated[1];
+  res[4] = rotated[2];
+  res[5] = rotated[5];
 }
 
 }  // namespace
@@ -183,6 +219,19 @@ static bool islimited(int limited, const double range[2]) {
     return true;
   }
   return false;
+}
+
+// forget the keyframe values which are stored under the given names, or all others if keep is true
+template <class T>
+static void forgetvalues(std::map<std::string, T>&       values,
+                         const std::vector<std::string>& names,
+                         bool                            keep) {
+  std::map<std::string, T> named;
+  for (const std::string& name : names) {
+    auto value = values.find(name);
+    if (value != values.end()) { named.insert(values.extract(value)); }
+  }
+  if (keep) { values = std::move(named); }
 }
 
 //------------------------- class mjCError implementation ------------------------------------------
@@ -1459,10 +1508,11 @@ void mjCDef::CopyFromSpec() {
 mjCBase::mjCBase() {
   name.clear();
   classname.clear();
-  id    = -1;
-  info  = "";
-  model = 0;
-  frame = nullptr;
+  id       = -1;
+  info     = "";
+  model    = 0;
+  frame    = nullptr;
+  compiler = nullptr;
 }
 
 
@@ -1671,6 +1721,10 @@ mjCBody& mjCBody::operator+=(const mjCFrame& other) {
     static_cast<mjCModel*>(other.model->spec.element)->AddRef();
   }
 
+  // the tree of this model is about to change: store its keyframes, before the other model lays
+  // out its own, which changes the addresses of the elements they share
+  if (other.model != model) { model->StoreKeyframes(nullptr); }
+
   // create a copy of the subtree that contains the frame
   mjCBody* subtree    = other.body;
   other.model->prefix = other.prefix;
@@ -1693,11 +1747,8 @@ mjCBody& mjCBody::operator+=(const mjCFrame& other) {
   frames.back()->model    = model;
   frames.back()->compiler = origin ? &origin->compiler : &model->spec.compiler;
   frames.back()->frame    = other.frame;
-  if (model->deepcopy_) {
-    frames.back()->NameSpace(other_model);
-  } else {
-    frames.back()->AddRef();
-  }
+  frames.back()->NameSpace(other_model);
+  if (!model->deepcopy_) { frames.back()->AddRef(); }
   int i         = frames.size();
   last_attached = &frames.back()->spec;
 
@@ -1719,26 +1770,26 @@ mjCBody& mjCBody::operator+=(const mjCFrame& other) {
   CopyList(cameras, subtree->cameras, fmap, &other);
   CopyList(lights, subtree->lights, fmap, &other);
 
-  if (!model->deepcopy_) {
-    std::string name = subtree->name;
-    subtree->SetModel(model);
-    subtree->NameSpace(other_model);
-    subtree->name = name;
-  }
-
   int nbodies = (int)subtree->bodies.size();
   for (int i = 0; i < nbodies; i++) {
     if (!other.IsAncestor(subtree->bodies[i]->frame)) { continue; }
     if (model->deepcopy_) {
       mjCBody* newbody(new mjCBody(*subtree->bodies[i], model));  // triggers recursive call
       bodies.push_back(newbody);
-      subtree->bodies[i]->ForgetKeyframes();
       bodies.back()->NameSpace_(other_model, /*propagate=*/false);
     } else {
       bodies.push_back(subtree->bodies[i]);
       bodies.back()->SetModel(model);
       bodies.back()->ResetId();
       bodies.back()->AddRef();
+      bodies.back()->NameSpace(other_model);
+    }
+
+    // the attached body does not take the values of the keyframes which stay in place in the
+    // other model; a copy leaves them, and only them, in the original
+    bodies.back()->ForgetKeyframes(other_model->inplacekeys_);
+    if (model->deepcopy_) {
+      subtree->bodies[i]->ForgetKeyframes(other_model->inplacekeys_, /*keep=*/true);
     }
     bodies.back()->parent = this;
     bodies.back()->frame =
@@ -1748,9 +1799,6 @@ mjCBody& mjCBody::operator+=(const mjCFrame& other) {
   // attach referencing elements
   other_model->SetAttached(model->deepcopy_);
   *model += *other_model;
-
-  // leave the source model in a clean state
-  if (other_model != model) { other_model->key_pending_.clear(); }
 
   // clear namespace and return body
   other_model->prefix.clear();
@@ -1771,8 +1819,12 @@ void mjCBody::CopyList(std::vector<T*>&          dst,
     if (pframe && !pframe->IsAncestor(src[i]->frame)) {
       continue;  // skip if the element is not inside pframe
     }
-    mjSpec* origin  = model->FindSpec(src[i]->compiler);
-    T*      new_obj = model->deepcopy_ ? new T(*src[i]) : src[i];
+    mjSpec*   origin       = model->FindSpec(src[i]->compiler);
+    mjCModel* source_model = src[i]->model;
+    T*        new_obj      = model->deepcopy_ ? new T(*src[i]) : src[i];
+
+    // an attached element does not take the values of the keyframes which stay in place
+    if (pframe) { new_obj->ForgetKeyframes(src[i]->model->inplacekeys_); }
     dst.push_back(new_obj);
     dst.back()->body     = this;
     dst.back()->model    = model;
@@ -1781,11 +1833,15 @@ void mjCBody::CopyList(std::vector<T*>&          dst,
     dst.back()->CopyPlugin();
     dst.back()->classname = src[i]->classname;
 
-    // increment refcount if shallow copy is made
-    if (!model->deepcopy_) { dst.back()->AddRef(); }
+    // increment refcount if shallow copy is made; the moved element forgets its addresses in the
+    // model it comes from
+    if (!model->deepcopy_) {
+      dst.back()->AddRef();
+      dst.back()->ResetId();
+    }
 
-    // set namespace
-    dst.back()->NameSpace(src[i]->model);
+    // set namespace; an element moved by reference was given this model above
+    dst.back()->NameSpace(source_model);
   }
 
   // assign dst frame to src frame
@@ -1864,11 +1920,7 @@ void mjCBody::ResetId() {
   for (auto& body : bodies) { body->ResetId(); }
   for (auto& frame : frames) { frame->id = -1; }
   for (auto& geom : geoms) { geom->id = -1; }
-  for (auto& joint : joints) {
-    joint->id       = -1;
-    joint->qposadr_ = -1;
-    joint->dofadr_  = -1;
-  }
+  for (auto& joint : joints) { joint->ResetId(); }
   for (auto& site : sites) { site->id = -1; }
   for (auto& camera : cameras) { camera->id = -1; }
   for (auto& light : lights) { light->id = -1; }
@@ -1981,6 +2033,10 @@ mjCBody* mjCBody::AddBody(mjCDef* _def) {
 // create new frame and add it to body
 mjCFrame* mjCBody::AddFrame(mjCFrame* _frame) {
   mjCFrame* obj = new mjCFrame(model, _frame ? _frame : NULL);
+
+  // set body pointer, add
+  obj->body = this;
+
   frames.push_back(obj);
   model->ResetTreeLists();
   model->MakeTreeLists();
@@ -2113,19 +2169,37 @@ mjCLight* mjCBody::AddLight(mjCDef* _def) {
 
 
 // create a frame in the parent body and move all contents of this body into it
-mjCFrame* mjCBody::ToFrame() {
+mjCFrame* mjCBody::ToFrame(bool mergeinertial) {
+  if (!parent) { throw mjCError(this, "the world body cannot be converted to a frame"); }
+
+  // merge the inertial into the parent; this can fail, do it before anything is modified
+  if (mergeinertial && parent->name != "world") {
+    // an inertial is either given in the spec, or inferred from geoms when compiling
+    bool given         = !InfersInertial() && mjuu_defined(spec.ipos[0]) && spec.mass >= mjMINVAL;
+    bool inferred      = InfersInertial() && !geoms.empty();
+    bool parent_given  = !parent->InfersInertial() && mjuu_defined(parent->spec.ipos[0]);
+    bool parent_infers = parent->InfersInertial() && !parent->geoms.empty();
+
+    // one is given and the other inferred: compile the tree to know what is inferred; if both
+    // are inferred, the geoms move to the parent and take the inertia with them
+    if ((given && parent_infers) || (inferred && parent_given)) {
+      if (!model->Resolve(nullptr)) {
+        std::string error = model->GetError().message;
+        throw mjCError(this,
+                       "inertia inferred from geoms could not be calculated; if assets are in a "
+                       "VFS, call mjs_adoptInertial first: %s",
+                       error.c_str());
+      }
+      if (given || mass >= mjMINVAL) { parent->MergeInertial(this); }
+    } else if (given) {
+      parent->MergeInertial(this);
+    }
+  }
+
   mjCFrame* newframe = parent->AddFrame(frame);
   mjuu_copyvec(newframe->spec.pos, spec.pos, 3);
   mjuu_copyvec(newframe->spec.quat, spec.quat, 4);
-  if (parent->name != "world" && mass >= mjMINVAL) {
-    if (!parent->explicitinertial) {
-      parent->MakeInertialExplicit();
-      mjuu_zerovec(parent->spec.ipos, 3);
-      mjuu_zerovec(parent->spec.iquat, 4);
-      mjuu_zerovec(parent->spec.inertia, 3);
-    }
-    parent->AccumulateInertia(&this->spec, &parent->spec);
-  }
+  newframe->spec.alt = spec.alt;
   MapFrame(parent->bodies, bodies, newframe, parent);
   MapFrame(parent->geoms, geoms, newframe, parent);
   MapFrame(parent->joints, joints, newframe, parent);
@@ -2444,11 +2518,192 @@ void mjCBody::MakeInertialExplicit() {
 }
 
 
-// accumulate inertia of another body into this body
-void mjCBody::AccumulateInertia(const mjsBody* other, mjsBody* result) {
-  if (!result) {
-    result = this;  // use the private mjsBody
+// make the inertial which compilation calculated for this body part of the spec
+void mjCBody::AdoptInertial() {
+  MakeInertialExplicit();
+  iframe    = nullptr;  // the inertial frame is in body coordinates
+  spec.mass = mass;
+  mjuu_copyvec(spec.ipos, ipos_compiled_, 3);
+  mjuu_copyvec(spec.iquat, iquat_compiled_, 4);
+  mjuu_copyvec(spec.inertia, inertia, 3);
+  spec.fullinertia[0] = mjNAN;
+  mjs_defaultOrientation(&spec.ialt);
+}
+
+
+// turn a compiled pose of this body into the pose in the spec which compiles to it
+void mjCBody::PoseInSpec(double bodypos[3], double bodyquat[4]) const {
+  // the alignment moved the frame of the body to its inertial frame
+  if (aligned_) { mjuu_frameaccuminv(bodypos, bodyquat, ipos_compiled_, iquat_compiled_); }
+  if (frame) { frame->ToLocal(bodypos, bodyquat); }
+}
+
+
+// turn a compiled pose of an element of this body into the pose in the spec which compiles to it
+void mjCBody::ElementPoseInSpec(const mjCFrame* elementframe,
+                                double          elementpos[3],
+                                double          elementquat[4]) const {
+  // the alignment moved the frames of the body with what they hold, and what is in no frame alone
+  if (elementframe) {
+    elementframe->ToLocal(elementpos, elementquat);
+  } else if (aligned_) {
+    mjuu_frameaccumChild(ipos_compiled_, iquat_compiled_, elementpos, elementquat);
   }
+}
+
+
+// write to the spec the position and the orientation which compile to the compiled ones: the
+// alignment with a free joint offsets the position by the orientation, which then gives both
+void mjCBody::PoseToSpec(bool position, bool orientation) {
+  double specpos[3], specquat[4];
+  mjuu_copyvec(specpos, pos, 3);
+  mjuu_copyvec(specquat, quat, 4);
+  PoseInSpec(specpos, specquat);
+  const bool offset = aligned_ && (ipos_compiled_[0] || ipos_compiled_[1] || ipos_compiled_[2]);
+  if (position || (orientation && offset)) { mjuu_copyvec(spec.pos, specpos, 3); }
+  if (orientation) {
+    mjuu_copyvec(spec.quat, specquat, 4);
+    mjs_defaultOrientation(&spec.alt);
+  }
+}
+
+
+// write to the spec the inertial which compiles to the compiled one
+void mjCBody::InertialToSpec(bool massonly) {
+  // an inertial which the spec gives stays as it was written if only the mass is new
+  if (massonly && mjuu_defined(spec.ipos[0])) {
+    spec.mass = mass;
+    return;
+  }
+
+  // otherwise all of it is given, as when it is adopted: alignment with a free joint leaves the
+  // inertial frame where the spec has it, and without alignment it is the compiled one
+  if (!aligned_) {
+    mjuu_copyvec(ipos_compiled_, ipos, 3);
+    mjuu_copyvec(iquat_compiled_, iquat, 4);
+  }
+  AdoptInertial();
+  explicitinertial = true;
+}
+
+
+// true if compilation infers the inertial of this body from its geoms
+bool mjCBody::InfersInertial() const {
+  return compiler->inertiafromgeom == mjINERTIAFROMGEOM_TRUE ||
+         (compiler->inertiafromgeom == mjINERTIAFROMGEOM_AUTO && !mjuu_defined(spec.ipos[0]));
+}
+
+
+// get the inertial which compilation calculated: center of mass in body coordinates and inertia
+// matrix about it
+void mjCBody::CompiledInertial(double com[3], double inert[6]) const {
+  double local[6] = {inertia[0], inertia[1], inertia[2], 0, 0, 0};
+  mjuu_copyvec(com, ipos_compiled_, 3);
+  RotateInertia(inert, local, iquat_compiled_);
+}
+
+
+// get the inertial in the spec: center of mass in body coordinates and inertia matrix about it
+void mjCBody::SpecInertial(double com[3], double inert[6]) const {
+  double orient[4];
+  double local[6] = {spec.inertia[0], spec.inertia[1], spec.inertia[2], 0, 0, 0};
+  mjuu_copyvec(com, spec.ipos, 3);
+  mjuu_copyvec(orient, spec.iquat, 4);
+  mjuu_normvec(orient, 4);
+
+  // full or diagonal inertia in the inertial frame, same checks as the compiler
+  if (mjuu_defined(spec.fullinertia[0])) {
+    if (spec.ialt.type != mjORIENTATION_QUAT) {
+      throw mjCError(this, "fullinertia and inertial orientation cannot both be specified");
+    }
+    if (spec.inertia[0] || spec.inertia[1] || spec.inertia[2]) {
+      throw mjCError(this, "fullinertia and diagonal inertia cannot both be specified");
+    }
+    mjuu_copyvec(local, spec.fullinertia, 6);
+  } else {
+    const char* err = ResolveOrientation(orient, compiler->degree, compiler->eulerseq, spec.ialt);
+    if (err) { throw mjCError(this, "error '%s' in inertia alternative", err); }
+  }
+
+  // frame enclosing the inertial element
+  if (iframe) { FrameToBody(iframe, com, orient); }
+
+  RotateInertia(inert, local, orient);
+}
+
+
+// merge the inertial of a child body into the inertial in the spec of this body
+void mjCBody::MergeInertial(const mjCBody* child) {
+  // pose of the child in this body
+  double childpos[3], childquat[4];
+  mjuu_copyvec(childpos, child->spec.pos, 3);
+  mjuu_copyvec(childquat, child->spec.quat, 4);
+  mjuu_normvec(childquat, 4);
+  const char* err = ResolveOrientation(childquat,
+                                       child->compiler->degree,
+                                       child->compiler->eulerseq,
+                                       child->spec.alt);
+  if (err) { throw mjCError(child, "error '%s' in frame alternative", err); }
+  FrameToBody(child->frame, childpos, childquat);
+
+  // inertial of this body, if any: inferred from its geoms, or given. Without geoms nothing is
+  // inferred, and what an earlier compilation calculated is not read: the caller compiles the
+  // tree only when there are geoms to infer from
+  double masses[2] = {0, 0};
+  double coms[2][3], inerts[2][6];
+  mjuu_zerovec(coms[0], 3);
+  mjuu_zerovec(inerts[0], 6);
+  if (InfersInertial()) {
+    if (!geoms.empty()) {
+      masses[0] = mass;
+      CompiledInertial(coms[0], inerts[0]);
+    }
+  } else if (mjuu_defined(spec.ipos[0])) {
+    masses[0] = spec.mass;
+    SpecInertial(coms[0], inerts[0]);
+  }
+
+  // inertial of the child, in the coordinates of this body
+  if (child->InfersInertial()) {
+    masses[1] = child->mass;
+    child->CompiledInertial(coms[1], inerts[1]);
+  } else {
+    masses[1] = child->spec.mass;
+    child->SpecInertial(coms[1], inerts[1]);
+  }
+  mjuu_rotVecQuat(coms[1], coms[1], childquat);
+  mjuu_addtovec(coms[1], childpos, 3);
+  RotateInertia(inerts[1], inerts[1], childquat);
+
+  // total mass, center of mass and inertia about it
+  double totalmass     = masses[0] + masses[1];
+  double totalcom[3]   = {0, 0, 0};
+  double totalinert[6] = {0, 0, 0, 0, 0, 0};
+  for (int j = 0; j < 2; j++) {
+    for (int k = 0; k < 3; k++) { totalcom[k] += masses[j] * coms[j][k] / totalmass; }
+  }
+  for (int j = 0; j < 2; j++) {
+    double offcenter[6];
+    double dpos[3] = {coms[j][0] - totalcom[0], coms[j][1] - totalcom[1], coms[j][2] - totalcom[2]};
+    mjuu_offcenter(offcenter, masses[j], dpos);
+    for (int k = 0; k < 6; k++) { totalinert[k] += inerts[j][k] + offcenter[k]; }
+  }
+
+  // save as full inertia in body coordinates
+  MakeInertialExplicit();
+  iframe    = nullptr;
+  spec.mass = totalmass;
+  mjuu_copyvec(spec.ipos, totalcom, 3);
+  mjuu_setvec(spec.iquat, 1, 0, 0, 0);
+  mjuu_setvec(spec.inertia, 0, 0, 0);
+  mjuu_copyvec(spec.fullinertia, totalinert, 6);
+  mjs_defaultOrientation(&spec.ialt);
+}
+
+
+// accumulate compiled inertia of another body into this body
+void mjCBody::AccumulateInertia(const mjsBody* other) {
+  mjsBody* result = this;  // the private mjsBody
 
   // body_ipose = body_pose * body_ipose
   double other_ipos[3];
@@ -2537,15 +2792,13 @@ void mjCBody::ComputeBVH() {
 }
 
 
-// reset keyframe references for allowing self-attach
-void mjCBody::ForgetKeyframes() const {
-  for (auto joint : joints) {
-    joint->qpos_.clear();
-    joint->qvel_.clear();
-  }
-  ((mjCBody*)this)->mpos_.clear();
-  ((mjCBody*)this)->mquat_.clear();
-  for (auto body : bodies) { body->ForgetKeyframes(); }
+// forget the keyframe values of this body and its subtree which are stored under the given names,
+// or all others if keep is true
+void mjCBody::ForgetKeyframes(const std::vector<std::string>& names, bool keep) {
+  forgetvalues(mpos_, names, keep);
+  forgetvalues(mquat_, names, keep);
+  for (mjCJoint* joint : joints) { joint->ForgetKeyframes(names, keep); }
+  for (mjCBody* body : bodies) { body->ForgetKeyframes(names, keep); }
 }
 
 
@@ -2653,6 +2906,7 @@ void mjCBody::Compile(void) {
   }
 
   // check and correct mass and inertia
+  const double unadjusted[4] = {mass, inertia[0], inertia[1], inertia[2]};
   if (id > 0) {
     // fix minimum
     mass       = std::max(mass, compiler->boundmass);
@@ -2676,6 +2930,17 @@ void mjCBody::Compile(void) {
       }
     }
   }
+  inertia_adjusted_ = mass != unadjusted[0] ||
+                      inertia[0] != unadjusted[1] ||
+                      inertia[1] != unadjusted[2] ||
+                      inertia[2] != unadjusted[3];
+
+  // the inertial as it would be authored: alignment with a free joint changes its frame below, and
+  // settotalmass scales its mass and inertia once all bodies are compiled
+  mjuu_copyvec(ipos_compiled_, ipos, 3);
+  mjuu_copyvec(iquat_compiled_, iquat, 4);
+  mass_compiled_ = mass;
+  mjuu_copyvec(inertia_compiled_, inertia, 3);
 
   // frame
   if (frame) { mjuu_frameaccumChild(frame->pos, frame->quat, pos, quat); }
@@ -2696,6 +2961,7 @@ void mjCBody::Compile(void) {
                      (joints[0]->spec.align == 1 ||         // either joint.align="true"
                       (joints[0]->spec.align == 2 &&        // or (joint.align="auto"
                        compiler->alignfree)));              //     and compiler->align="true")
+  aligned_        = align_free;
 
   // free-joint alignment, phase 1 (this body + child geoms)
   double ipos_inverse[3], iquat_inverse[4];
@@ -2845,6 +3111,10 @@ mjCFrame& mjCFrame::operator+=(const mjCBody& other) {
     static_cast<mjCModel*>(other.model->spec.element)->AddRef();
   }
 
+  // the tree of this model is about to change: store its keyframes, before the other model lays
+  // out its own, which changes the addresses of the elements they share
+  if (other.model != model) { model->StoreKeyframes(nullptr); }
+
   // apply namespace and store keyframes in the source model
   other.model->prefix = other.prefix;
   other.model->suffix = other.suffix;
@@ -2855,8 +3125,12 @@ mjCFrame& mjCFrame::operator+=(const mjCBody& other) {
 
   // attach or copy the subtree
   mjCBody* subtree = model->deepcopy_ ? new mjCBody(other, model) : (mjCBody*)&other;
+
+  // the attached body does not take the values of the keyframes which stay in place in the other
+  // model; a copy leaves them, and only them, in the original
+  subtree->ForgetKeyframes(other_model->inplacekeys_);
   if (model->deepcopy_) {
-    other.ForgetKeyframes();
+    ((mjCBody*)&other)->ForgetKeyframes(other_model->inplacekeys_, /*keep=*/true);
   } else {
     subtree->SetModel(model);
     subtree->ResetId();
@@ -2883,9 +3157,6 @@ mjCFrame& mjCFrame::operator+=(const mjCBody& other) {
   other_model->SetAttached(model->deepcopy_);
   *model += *other_model;
 
-  // leave the source model in a clean state
-  if (other_model != model) { other_model->key_pending_.clear(); }
-
   // clear suffixes and return
   other_model->suffix.clear();
   other_model->prefix.clear();
@@ -2907,6 +3178,14 @@ void mjCFrame::PointToLocal() {
   spec.element    = static_cast<mjsElement*>(this);
   spec.childclass = &classname;
   spec.info       = &info;
+}
+
+
+// express in this frame, as compiled, a pose which is given in its body
+void mjCFrame::ToLocal(double childpos[3], double childquat[4]) const {
+  double invpos[3], invquat[4];
+  mjuu_frameinvert(invpos, invquat, pos, quat);
+  mjuu_frameaccumChild(invpos, invquat, childpos, childquat);
 }
 
 
@@ -2986,6 +3265,13 @@ mjCJoint& mjCJoint::operator=(const mjCJoint& other) {
 }
 
 
+void mjCJoint::ResetId() {
+  id       = -1;
+  qposadr_ = -1;
+  dofadr_  = -1;
+}
+
+
 bool mjCJoint::is_limited() const {
   return islimited(limited, range);
 }
@@ -3031,6 +3317,12 @@ mjtNum* mjCJoint::qpos(const std::string& state_name) {
 mjtNum* mjCJoint::qvel(const std::string& state_name) {
   if (qvel_.find(state_name) == qvel_.end()) { qvel_[state_name] = {mjNAN, 0, 0, 0, 0, 0}; }
   return qvel_.at(state_name).data();
+}
+
+
+void mjCJoint::ForgetKeyframes(const std::vector<std::string>& names, bool keep) {
+  forgetvalues(qpos_, names, keep);
+  forgetvalues(qvel_, names, keep);
 }
 
 
@@ -3160,6 +3452,16 @@ int mjCJoint::Compile(void) {
 }
 
 
+// write to the spec the anchor and the axis which compile to the compiled ones
+void mjCJoint::AnchorToSpec(bool anchor, bool direction) {
+  double specpos[3], rotation[4] = {1, 0, 0, 0};
+  mjuu_copyvec(specpos, pos, 3);
+  if (frame) { frame->ToLocal(specpos, rotation); }
+  if (anchor) { mjuu_copyvec(spec.pos, specpos, 3); }
+  if (direction) { mjuu_rotVecQuat(spec.axis, axis, rotation); }
+}
+
+
 //------------------ class mjCGeom implementation --------------------------------------------------
 
 // initialize default geom
@@ -3167,12 +3469,11 @@ mjCGeom::mjCGeom(mjCModel* _model, mjCDef* _def) {
   mjs_defaultGeom(&spec);
   elemtype = mjOBJ_GEOM;
 
-  mass_   = 0;
-  body    = 0;
-  matid   = -1;
-  mesh    = nullptr;
-  hfield  = nullptr;
-  visual_ = false;
+  mass_  = 0;
+  body   = 0;
+  matid  = -1;
+  mesh   = nullptr;
+  hfield = nullptr;
   mjuu_setvec(inertia, 0, 0, 0);
   inferinertia = true;
   spec_material_.clear();
@@ -3859,9 +4160,6 @@ void mjCGeom::Compile(void) {
     if (!weld->spec.mocap) { throw mjCError(this, "plane only allowed in static bodies"); }
   }
 
-  // check if can collide
-  visual_ = !contype && !conaffinity;
-
   // normalize quaternion
   mjuu_normvec(quat, 4);
 
@@ -4027,6 +4325,75 @@ void mjCGeom::Compile(void) {
 
   // frame
   if (frame) { mjuu_frameaccumChild(frame->pos, frame->quat, pos, quat); }
+}
+
+
+// write to the spec the position and the orientation which compile to the compiled ones
+void mjCGeom::PoseToSpec(bool position, bool orientation) {
+  double specpos[3], specquat[4];
+  mjuu_copyvec(specpos, pos, 3);
+  mjuu_copyvec(specquat, quat, 4);
+
+  // compilation adds the frame of the mesh to the pose of a mesh geom: an offset mesh offsets
+  // the position by the orientation, which then gives both
+  bool offset = false;
+  if (mesh && (type == mjGEOM_MESH || type == mjGEOM_SDF)) {
+    const double* meshpos = mesh->GetPosPtr();
+    mjuu_frameaccuminv(specpos, specquat, meshpos, mesh->GetQuatPtr());
+    offset = meshpos[0] || meshpos[1] || meshpos[2];
+  }
+  body->ElementPoseInSpec(frame, specpos, specquat);
+  if (position || (orientation && offset)) { mjuu_copyvec(spec.pos, specpos, 3); }
+  if (orientation) {
+    mjuu_copyvec(spec.quat, specquat, 4);
+    mjs_defaultOrientation(&spec.alt);
+  }
+}
+
+
+// write to the spec the size, pose and surface velocity which compile to the compiled ones
+void mjCGeom::ShapeToSpec(bool newsize, bool position, bool orientation, bool newvelocity) {
+  const bool fitted  = type != mjGEOM_MESH && type != mjGEOM_SDF && !spec_meshname_.empty();
+  const bool span    = mjuu_defined(spec.fromto[0]);
+  const bool newpose = position || orientation;
+
+  // fromto does not give the radius of a capsule or cylinder: a new one leaves fromto as it is
+  if (span && !newpose && (type == mjGEOM_CAPSULE || type == mjGEOM_CYLINDER)) {
+    double vec[3] = {spec.fromto[0] - spec.fromto[3],
+                     spec.fromto[1] - spec.fromto[4],
+                     spec.fromto[2] - spec.fromto[5]};
+    if (size[1] == mjuu_normvec(vec, 3) / 2) {
+      spec.size[0] = size[0];
+      newsize      = false;
+    }
+  }
+
+  // a size and pose which are given by fromto, or by fitting the geom to a mesh, are written in
+  // its place; the surface velocity is then in the compiled frame of the geom
+  if ((span && (newsize || newpose)) || (fitted && (newsize || newpose || newvelocity))) {
+    spec.fromto[0] = mjNAN;
+    if (fitted) {
+      spec_meshname_.clear();
+      newvelocity = true;
+    }
+    newsize = position = orientation = true;
+  }
+
+  if (newsize) { mjuu_copyvec(spec.size, size, 3); }
+  PoseToSpec(position, orientation);
+
+  // compilation expresses the surface velocity of a mesh geom in the frame of the mesh: rotate
+  // both parts back, and move the origin of the angular part back from the mesh position
+  if (newvelocity) {
+    mjuu_copyvec(spec.surfacevel, surfacevel, 6);
+    if (mesh && (type == mjGEOM_MESH || type == mjGEOM_SDF)) {
+      double wxp[3];
+      mjuu_rotVecQuat(spec.surfacevel, surfacevel, mesh->GetQuatPtr());
+      mjuu_rotVecQuat(spec.surfacevel + 3, surfacevel + 3, mesh->GetQuatPtr());
+      mjuu_crossvec(wxp, spec.surfacevel + 3, mesh->GetPosPtr());
+      for (int i = 0; i < 3; i++) { spec.surfacevel[i] -= wxp[i]; }
+    }
+  }
 }
 
 
@@ -4202,6 +4569,47 @@ void mjCSite::Compile(void) {
 }
 
 
+// write to the spec the position and the orientation which compile to the compiled ones
+void mjCSite::PoseToSpec(bool position, bool orientation) {
+  double specpos[3], specquat[4];
+  mjuu_copyvec(specpos, pos, 3);
+  mjuu_copyvec(specquat, quat, 4);
+  body->ElementPoseInSpec(frame, specpos, specquat);
+  if (position) { mjuu_copyvec(spec.pos, specpos, 3); }
+  if (orientation) {
+    mjuu_copyvec(spec.quat, specquat, 4);
+    mjs_defaultOrientation(&spec.alt);
+  }
+}
+
+
+// write to the spec the size and pose which compile to the compiled ones
+void mjCSite::ShapeToSpec(bool newsize, bool position, bool orientation) {
+  const bool span    = mjuu_defined(spec.fromto[0]);
+  const bool newpose = position || orientation;
+
+  // fromto does not give the radius of a capsule or cylinder: a new one leaves fromto as it is
+  if (span && !newpose && (type == mjGEOM_CAPSULE || type == mjGEOM_CYLINDER)) {
+    double vec[3] = {spec.fromto[0] - spec.fromto[3],
+                     spec.fromto[1] - spec.fromto[4],
+                     spec.fromto[2] - spec.fromto[5]};
+    if (size[1] == mjuu_normvec(vec, 3) / 2) {
+      spec.size[0] = size[0];
+      newsize      = false;
+    }
+  }
+
+  // a size and pose which are given by fromto are written in its place
+  if (span && (newsize || newpose)) {
+    spec.fromto[0] = mjNAN;
+    newsize = position = orientation = true;
+  }
+
+  if (newsize) { mjuu_copyvec(spec.size, size, 3); }
+  PoseToSpec(position, orientation);
+}
+
+
 //------------------ class mjCCamera implementation ------------------------------------------------
 
 // initialize defaults
@@ -4271,6 +4679,7 @@ void mjCCamera::CopyFromSpec() {
 
 
 void mjCCamera::ResolveReferences(const mjCModel* m) {
+  targetbodyid = -1;
   if (!targetbody_.empty()) {
     mjCBody* tb = (mjCBody*)m->FindObject(mjOBJ_BODY, targetbody_);
     if (tb) {
@@ -4363,6 +4772,34 @@ void mjCCamera::Compile(void) {
 }
 
 
+// write to the spec the position and the orientation which compile to the compiled ones
+void mjCCamera::PoseToSpec(bool position, bool orientation) {
+  double specpos[3], specquat[4];
+  mjuu_copyvec(specpos, pos, 3);
+  mjuu_copyvec(specquat, quat, 4);
+  body->ElementPoseInSpec(frame, specpos, specquat);
+  if (position) { mjuu_copyvec(spec.pos, specpos, 3); }
+  if (orientation) {
+    mjuu_copyvec(spec.quat, specquat, 4);
+    mjs_defaultOrientation(&spec.alt);
+  }
+}
+
+
+// write the compiled intrinsics as focal length and principal point, in units of length
+void mjCCamera::IntrinsicToSpec(bool tospec) {
+  for (mjsCamera* camera : {static_cast<mjsCamera*>(this), tospec ? &spec : nullptr}) {
+    if (!camera) { continue; }
+    for (int i = 0; i < 2; i++) {
+      camera->focal_length[i]     = intrinsic[i];
+      camera->principal_length[i] = intrinsic[i + 2];
+      camera->focal_pixel[i]      = 0;
+      camera->principal_pixel[i]  = 0;
+    }
+  }
+}
+
+
 //------------------ class mjCLight implementation -------------------------------------------------
 
 // initialize defaults
@@ -4433,6 +4870,8 @@ void mjCLight::CopyFromSpec() {
 
 
 void mjCLight::ResolveReferences(const mjCModel* m) {
+  targetbodyid = -1;
+  texid        = -1;
   if (!targetbody_.empty()) {
     mjCBody* tb = (mjCBody*)m->FindObject(mjOBJ_BODY, targetbody_);
     if (tb) {
@@ -4474,6 +4913,16 @@ void mjCLight::Compile(void) {
 
   // get targetbodyid and texid
   ResolveReferences(model);
+}
+
+
+// write to the spec the position and the direction which compile to the compiled ones
+void mjCLight::PoseToSpec(bool position, bool direction) {
+  double specpos[3], rotation[4] = {1, 0, 0, 0};
+  mjuu_copyvec(specpos, pos, 3);
+  body->ElementPoseInSpec(frame, specpos, rotation);
+  if (position) { mjuu_copyvec(spec.pos, specpos, 3); }
+  if (direction) { mjuu_rotVecQuat(spec.dir, dir, rotation); }
 }
 
 
@@ -4543,24 +4992,6 @@ void mjCHField::CopyFromSpec() {
     nrow = 0;
     ncol = 0;
   }
-
-  // use filename if name is missing
-  if (name.empty()) {
-    std::string stripped = mjuu_strippath(file_);
-
-    name = mjuu_stripext(stripped);
-  }
-}
-
-
-void mjCHField::NameSpace(const mjCModel* m) {
-  // use filename if name is missing
-  if (name.empty()) {
-    std::string stripped = mjuu_strippath(spec_file_);
-
-    name = mjuu_stripext(stripped);
-  }
-  mjCBase::NameSpace(m);
 }
 
 
@@ -4762,7 +5193,7 @@ mjCTexture::mjCTexture(mjCModel* _model) {
 
   // clear internal variables
   data_.clear();
-  clear_data_ = false;
+  spec_data_.clear();
 
   // point to local
   PointToLocal();
@@ -4781,7 +5212,7 @@ mjCTexture& mjCTexture::operator=(const mjCTexture& other) {
   if (this != &other) {
     this->spec                       = other.spec;
     *static_cast<mjCTexture_*>(this) = static_cast<const mjCTexture_&>(other);
-    clear_data_                      = other.clear_data_;
+    *static_cast<mjsTexture*>(this)  = static_cast<const mjsTexture&>(other);
   }
   PointToLocal();
   return *this;
@@ -4791,7 +5222,7 @@ mjCTexture& mjCTexture::operator=(const mjCTexture& other) {
 void mjCTexture::PointToLocal() {
   spec.element      = static_cast<mjsElement*>(this);
   spec.file         = &spec_file_;
-  spec.data         = &data_;
+  spec.data         = &spec_data_;
   spec.content_type = &spec_content_type_;
   spec.cubefiles    = &spec_cubefiles_;
   spec.info         = &info;
@@ -4808,28 +5239,8 @@ void mjCTexture::CopyFromSpec() {
   content_type_ = spec_content_type_;
   cubefiles_    = spec_cubefiles_;
 
-  if (clear_data_) {
-    // clear precompiled asset. TODO: use asset cache
-    data_.clear();
-  }
-
-  // use filename if name is missing
-  if (name.empty()) {
-    std::string stripped = mjuu_strippath(file_);
-
-    name = mjuu_stripext(stripped);
-  }
-}
-
-
-void mjCTexture::NameSpace(const mjCModel* m) {
-  // use filename if name is missing
-  if (name.empty()) {
-    std::string stripped = mjuu_strippath(spec_file_);
-
-    name = mjuu_stripext(stripped);
-  }
-  mjCBase::NameSpace(m);
+  // the buffer given by the user, if any; otherwise Compile fills the data
+  data_ = spec_data_;
 }
 
 
@@ -5261,6 +5672,11 @@ void mjCTexture::LoadCubeSingle(std::string filename, const mjVFS* vfs) {
   std::vector<std::byte> image;
   LoadFlip(filename, vfs, image, w, h, is_srgb);
 
+  // faces are copied with 3 channels
+  if (nchannel != 3) {
+    throw mjCError(this, "cube and skybox textures loaded from files must have 3 channels");
+  }
+
   if (colorspace == mjCOLORSPACE_AUTO) {
     colorspace = is_srgb ? mjCOLORSPACE_SRGB : mjCOLORSPACE_LINEAR;
   }
@@ -5384,6 +5800,11 @@ void mjCTexture::LoadCubeSeparate(const mjVFS* vfs) {
       std::vector<std::byte> image;
       LoadFlip(filename.Str(), vfs, image, w, h, is_srgb);
 
+      // faces are copied with 3 channels
+      if (nchannel != 3) {
+        throw mjCError(this, "cube and skybox textures loaded from files must have 3 channels");
+      }
+
       // assume all faces have the same colorspace
       if (colorspace == mjCOLORSPACE_AUTO) {
         colorspace = is_srgb ? mjCOLORSPACE_SRGB : mjCOLORSPACE_LINEAR;
@@ -5471,6 +5892,9 @@ void mjCTexture::Compile(const mjVFS* vfs) {
 
   // builtin
   else if (builtin != mjBUILTIN_NONE) {
+    // builtin textures are generated with 3 channels
+    if (nchannel != 3) { throw mjCError(this, "builtin textures must have 3 channels"); }
+
     // check width
     if (width < 1) { throw mjCError(this, "Invalid width of builtin texture"); }
 
@@ -5544,9 +5968,6 @@ void mjCTexture::Compile(const mjVFS* vfs) {
   if (data_.empty()) {
     throw mjCError(this, "texture '%s' (id %d) was not specified", name.c_str(), id);
   }
-
-  // if recompiled is called, clear data_ first
-  clear_data_ = true;
 }
 
 
@@ -5723,8 +6144,12 @@ void mjCPair::ResolveReferences(const mjCModel* m) {
     throw mjCError(this, "geom '%s' not found in collision %d", geomname2_.c_str(), id);
   }
 
-  spec_geomname1_ = geomname1_;
-  spec_geomname2_ = geomname2_;
+  // the names which a namespace gives are those of the spec from now on; without one they are
+  // left as written: those of a compiled pair are in the order of the bodies
+  if (!prefix.empty() || !suffix.empty()) {
+    spec_geomname1_ = geomname1_;
+    spec_geomname2_ = geomname2_;
+  }
   prefix.clear();
   suffix.clear();
 
@@ -5757,10 +6182,6 @@ void mjCPair::Compile(void) {
 
   // find geoms
   ResolveReferences(model);
-
-  // mark geoms as not visual
-  geom1->SetNotVisual();
-  geom2->SetNotVisual();
 
   // set undefined margin: max
   if (!mjuu_defined(margin)) { margin = std::max(geom1->margin, geom2->margin); }
@@ -5924,8 +6345,12 @@ void mjCBodyPair::ResolveReferences(const mjCModel* m) {
   if (!pb1) { throw mjCError(this, "body '%s' not found in bodypair %d", bodyname1_.c_str(), id); }
   if (!pb2) { throw mjCError(this, "body '%s' not found in bodypair %d", bodyname2_.c_str(), id); }
 
-  spec_bodyname1_ = bodyname1_;
-  spec_bodyname2_ = bodyname2_;
+  // the names which a namespace gives are those of the spec from now on; without one they are
+  // left as written: those of a compiled exclude are in the order of the bodies
+  if (!prefix.empty() || !suffix.empty()) {
+    spec_bodyname1_ = bodyname1_;
+    spec_bodyname2_ = bodyname2_;
+  }
   prefix.clear();
   suffix.clear();
 
@@ -6003,6 +6428,12 @@ mjCEquality& mjCEquality::operator=(const mjCEquality& other) {
   }
   PointToLocal();
   return *this;
+}
+
+
+void mjCEquality::ResetId() {
+  id     = -1;
+  eqadr_ = -1;
 }
 
 
@@ -6439,8 +6870,6 @@ void mjCTendon::Compile(void) {
                            id);
           }
 
-          // mark geoms as non visual
-          model->Geoms()[path[i]->obj->id]->SetNotVisual();
           break;
 
         case mjWRAP_JOINT:
@@ -6570,7 +6999,8 @@ void mjCWrap::ResolveReferences(const mjCModel* m) {
 
       break;
 
-    case mjWRAP_SPHERE:  // geom (cylinder type set here)
+    case mjWRAP_SPHERE:    // geom (cylinder type set here)
+    case mjWRAP_CYLINDER:  // a geom whose type was set here before
       // find geom by name
       obj = m->FindObject(mjOBJ_GEOM, name);
       if (!obj) {
@@ -6581,10 +7011,12 @@ void mjCWrap::ResolveReferences(const mjCModel* m) {
                        id);
       }
 
-      // set/check geom type
-      if (((mjCGeom*)obj)->type == mjGEOM_CYLINDER) {
+      // set/check geom type, as authored: the geom may not have been compiled
+      if (((mjCGeom*)obj)->spec.type == mjGEOM_CYLINDER) {
         spec.type = mjWRAP_CYLINDER;
-      } else if (((mjCGeom*)obj)->type != mjGEOM_SPHERE) {
+      } else if (((mjCGeom*)obj)->spec.type == mjGEOM_SPHERE) {
+        spec.type = mjWRAP_SPHERE;
+      } else {
         throw mjCError(this,
                        "geom '%s' in tendon %d, wrap %d is not sphere or cylinder",
                        name.c_str(),
@@ -6703,9 +7135,20 @@ mjCActuator& mjCActuator::operator=(const mjCActuator& other) {
 }
 
 
-void mjCActuator::ForgetKeyframes() {
-  act_.clear();
-  ctrl_.clear();
+void mjCActuator::ResetId() {
+  id          = -1;
+  actadr_     = -1;
+  actdim_     = -1;
+  ctrladr_    = -1;
+  outadr_     = -1;
+  historyadr_ = -1;
+  historynum_ = 0;
+}
+
+
+void mjCActuator::ForgetKeyframes(const std::vector<std::string>& names, bool keep) {
+  forgetvalues(act_, names, keep);
+  forgetvalues(ctrl_, names, keep);
 }
 
 
@@ -6777,6 +7220,7 @@ void mjCActuator::CopyPlugin() {
 
 
 void mjCActuator::ResolveReferences(const mjCModel* m) {
+  trnid[0] = trnid[1] = -1;
   switch (trntype) {
     case mjTRN_JOINT:
     case mjTRN_JOINTINPARENT:
@@ -7372,6 +7816,13 @@ mjCSensor& mjCSensor::operator=(const mjCSensor& other) {
 }
 
 
+void mjCSensor::ResetId() {
+  id          = -1;
+  historyadr_ = -1;
+  historynum_ = 0;
+}
+
+
 void mjCSensor::PointToLocal() {
   spec.element = static_cast<mjsElement*>(this);
 
@@ -7445,10 +7896,6 @@ void mjCSensor::ResolveReferences(const mjCModel* m) {
       throw mjCError(this, "unrecognized name '%s' of sensorized object", objname_.c_str());
     }
 
-    // if geom or mesh, mark it as non visual
-    if (objtype == mjOBJ_GEOM) { static_cast<mjCGeom*>(obj)->SetNotVisual(); }
-    if (objtype == mjOBJ_MESH) { static_cast<mjCMesh*>(obj)->SetNotVisual(); }
-
   } else if (type != mjSENS_E_POTENTIAL &&
              type != mjSENS_E_KINETIC &&
              type != mjSENS_CLOCK &&
@@ -7467,10 +7914,6 @@ void mjCSensor::ResolveReferences(const mjCModel* m) {
 
     // find name
     if (!ref) { throw mjCError(this, "unrecognized name '%s' of object", refname_.c_str()); }
-
-    // if geom or mesh, mark it as non visual
-    if (reftype == mjOBJ_GEOM) { static_cast<mjCGeom*>(ref)->SetNotVisual(); }
-    if (reftype == mjOBJ_MESH) { static_cast<mjCMesh*>(ref)->SetNotVisual(); }
 
     // must be attached to object with spatial frame
     if (reftype != mjOBJ_BODY &&
@@ -7813,6 +8256,55 @@ void mjCSensor::Compile(void) {
         throw mjCError(this, "sensor must be attached to (x)body, geom, site or camera");
       }
       if (reftype != mjOBJ_SITE) { throw mjCError(this, "sensor must be associated with a site"); }
+      if (intprm[0]) {
+        if (objtype == mjOBJ_CAMERA) {
+          throw mjCError(this, "camera is not supported in enclosed insidesite sensor");
+        }
+        datatype  = mjDATATYPE_REAL;
+        int stype = static_cast<mjCSite*>(ref)->spec.type;
+        if (stype < mjGEOM_SPHERE || stype > mjGEOM_MESH) {
+          throw mjCError(this,
+                         "site '%s' in enclosed insidesite sensor must be a compact convex shape",
+                         ref->name.c_str());
+        }
+        if (objtype == mjOBJ_GEOM) {
+          int gtype = static_cast<mjCGeom*>(obj)->Type();
+          if (gtype < mjGEOM_SPHERE || gtype > mjGEOM_MESH) {
+            throw mjCError(this,
+                           "geom '%s' in enclosed insidesite sensor must be a compact convex shape",
+                           obj->name.c_str());
+          }
+        } else if (objtype == mjOBJ_SITE) {
+          int o_stype = static_cast<mjCSite*>(obj)->spec.type;
+          if (o_stype < mjGEOM_SPHERE || o_stype > mjGEOM_MESH) {
+            throw mjCError(this,
+                           "site '%s' in enclosed insidesite sensor must be a compact convex shape",
+                           obj->name.c_str());
+          }
+        } else if (objtype == mjOBJ_BODY || objtype == mjOBJ_XBODY) {
+          std::vector<const mjCBody*> bodies = {static_cast<const mjCBody*>(obj)};
+          int                         ngeom  = 0;
+          for (size_t i = 0; i < bodies.size(); ++i) {
+            for (const mjCGeom* geom : bodies[i]->GetList<mjCGeom>()) {
+              ngeom++;
+              if (geom->Type() < mjGEOM_SPHERE || geom->Type() > mjGEOM_MESH) {
+                throw mjCError(
+                    this,
+                    "geom '%s' in enclosed insidesite sensor must be a compact convex shape",
+                    geom->name.c_str());
+              }
+            }
+            if (objtype == mjOBJ_XBODY) {
+              for (const mjCBody* child : bodies[i]->Bodies()) { bodies.push_back(child); }
+            }
+          }
+          if (ngeom == 0) {
+            throw mjCError(this,
+                           "body '%s' in enclosed insidesite sensor must have at least one geom",
+                           obj->name.c_str());
+          }
+        }
+      }
       break;
 
     case mjSENS_GEOMDIST:
@@ -8030,6 +8522,9 @@ void mjCNumeric::Compile(void) {
   if (!size) {
     throw mjCError(this, "numeric '%s' (id = %d): size cannot be zero", name.c_str(), id);
   }
+
+  // the model holds the data padded with zeros up to its size
+  data_.resize(size);
 }
 
 
@@ -8207,9 +8702,6 @@ void mjCTuple::ResolveReferences(const mjCModel* m) {
     if (!res) {
       throw mjCError(this, "unrecognized object '%s' in tuple %d", objname_[i].c_str(), id);
     }
-
-    // if geom mark it as non visual
-    if (objtype_[i] == mjOBJ_GEOM) { ((mjCGeom*)res)->SetNotVisual(); }
 
     // assign id
     obj[i] = res;
@@ -8452,6 +8944,13 @@ mjCPlugin& mjCPlugin::operator=(const mjCPlugin& other) {
   }
   PointToLocal();
   return *this;
+}
+
+
+void mjCPlugin::ResetId() {
+  id        = -1;
+  stateadr_ = -1;
+  statenum_ = 0;
 }
 
 

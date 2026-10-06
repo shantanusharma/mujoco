@@ -38,6 +38,7 @@ from mujoco.mjx.third_party.mujoco_warp._src.collision_primitive import primitiv
 from mujoco.mjx.third_party.mujoco_warp._src.collision_sdf import sdf_narrowphase as sdf_narrowphase
 from mujoco.mjx.third_party.mujoco_warp._src.constraint import make_constraint as make_constraint
 from mujoco.mjx.third_party.mujoco_warp._src.derivative import deriv_smooth_vel as deriv_smooth_vel
+from mujoco.mjx.third_party.mujoco_warp._src.forward import discrete as discrete
 from mujoco.mjx.third_party.mujoco_warp._src.forward import euler as euler
 from mujoco.mjx.third_party.mujoco_warp._src.forward import forward as forward
 from mujoco.mjx.third_party.mujoco_warp._src.forward import fwd_acceleration as fwd_acceleration
@@ -107,6 +108,7 @@ from mujoco.mjx.third_party.mujoco_warp._src.types import Callback as Callback
 from mujoco.mjx.third_party.mujoco_warp._src.types import ConeType as ConeType
 from mujoco.mjx.third_party.mujoco_warp._src.types import Constraint as Constraint
 from mujoco.mjx.third_party.mujoco_warp._src.types import Contact as Contact
+from mujoco.mjx.third_party.mujoco_warp._src.types import CtrlChart as CtrlChart
 from mujoco.mjx.third_party.mujoco_warp._src.types import CtrlInput as CtrlInput
 from mujoco.mjx.third_party.mujoco_warp._src.types import DisableBit as DisableBit
 from mujoco.mjx.third_party.mujoco_warp._src.types import DynType as DynType
