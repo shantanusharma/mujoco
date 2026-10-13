@@ -35,6 +35,7 @@
 #include <string>
 #include <string_view>
 #include <thread>
+#include <type_traits>
 #include <unordered_map>
 #include <unordered_set>
 #include <utility>
@@ -598,30 +599,51 @@ void mjCModel::RemoveFromList(std::vector<T*>& list, const mjCModel& other) {
 }
 
 
-template <class T>
-void mjCModel::MarkPluginInstance(std::unordered_map<std::string, bool>& instances,
-                                  const std::vector<T*>&                 list) {
-  for (const auto& element : list) {
-    if (!element->plugin_instance_name.empty()) { instances[element->plugin_instance_name] = true; }
+// return the plugin instances that elements or defaults reference by name or point to, including
+// the elements in the subtree of body, which can be outside the tree
+std::unordered_set<const mjsElement*> mjCModel::ReferencedPlugins(const mjCBody* body) {
+  std::unordered_set<std::string>       names;
+  std::unordered_set<const mjsElement*> pointers;
+
+  auto mark = [&names, &pointers](const auto& element) {
+    if (!element.plugin_instance_name.empty()) { names.insert(element.plugin_instance_name); }
+    if (element.spec.plugin.element) { pointers.insert(element.spec.plugin.element); }
+  };
+
+  // traverse the tree, the tree lists miss the elements added since they were built
+  std::vector<const mjCBody*> bodies = {bodies_[0]};
+  if (body) { bodies.push_back(body); }
+  for (int i = 0; i < bodies.size(); i++) {
+    mark(*bodies[i]);
+    for (const mjCGeom* geom : bodies[i]->geoms) { mark(*geom); }
+    bodies.insert(bodies.end(), bodies[i]->bodies.begin(), bodies[i]->bodies.end());
   }
+  for (const mjCMesh* mesh : meshes_) { mark(*mesh); }
+  for (const mjCActuator* actuator : actuators_) { mark(*actuator); }
+  for (const mjCSensor* sensor : sensors_) { mark(*sensor); }
+  for (mjCDef* def : defaults_) {
+    mark(def->Geom());
+    mark(def->Mesh());
+    mark(def->Actuator());
+  }
+
+  std::unordered_set<const mjsElement*> referenced;
+  for (const mjCPlugin* plugin : plugins_) {
+    if (pointers.count(plugin) || names.count(plugin->name)) { referenced.insert(plugin); }
+  }
+  return referenced;
 }
 
 
-void mjCModel::RemovePlugins() {
-  // store elements that reference a plugin instance
-  std::unordered_map<std::string, bool> instances;
-  MarkPluginInstance(instances, bodies_);
-  MarkPluginInstance(instances, geoms_);
-  MarkPluginInstance(instances, meshes_);
-  MarkPluginInstance(instances, actuators_);
-  MarkPluginInstance(instances, sensors_);
+void mjCModel::RemovePlugins(const std::unordered_set<const mjsElement*>& referenced) {
+  std::unordered_set<const mjsElement*> remaining = ReferencedPlugins();
 
-  // remove plugins that are not referenced
+  // remove plugins that are no longer referenced, keep plugins that were never referenced
   int nlist   = (int)plugins_.size();
   int removed = 0;
   for (int i = 0; i < nlist; i++) {
-    if (plugins_[i]->name.empty()) { continue; }
-    if (instances.find(plugins_[i]->name) == instances.end()) {
+    plugins_[i]->id -= removed;
+    if (referenced.count(plugins_[i]) && !remaining.count(plugins_[i])) {
       ids[plugins_[i]->elemtype].erase(plugins_[i]->name);
       names_[plugins_[i]->elemtype].erase(plugins_[i]->name);
       plugins_[i]->id = -1;
@@ -708,12 +730,6 @@ std::vector<mjCBase*> mjCModel::RemoveFromTree(const mjCFrame& frame) {
     mjuu_copyvec(body->spec.fullinertia, defaults.fullinertia, 6);
   }
 
-  // delete the plugins created by the removed elements
-  for (mjCBody* child : bodies) { DeleteSubtreePlugin(child); }
-  for (mjCGeom* geom : geoms) {
-    if (geom->plugin.active && geom->plugin.name->empty()) { *this -= geom->plugin.element; }
-  }
-
   // the removed elements no longer have a parent body or a frame
   self->SetParent(nullptr);
   self->frame = nullptr;
@@ -742,8 +758,8 @@ template <class T>
 mjCModel& mjCModel::RemoveSubtree(const T& subtree) {
   mjCModel oldmodel(*this);
 
-  // create global lists in the old model if not compiled
-  if (!oldmodel.IsCompiled()) { oldmodel.ProcessLists(/*checkrepeat=*/false); }
+  // create global lists in the old model, the name maps copied from a compiled model can be stale
+  oldmodel.ProcessLists(/*checkrepeat=*/false);
 
   // create global lists in this model if not compiled
   if (!IsCompiled()) { ProcessLists(/*checkrepeat=*/false); }
@@ -766,7 +782,6 @@ mjCModel& mjCModel::RemoveSubtree(const T& subtree) {
   RemoveFromList(equalities_, oldmodel);
   RemoveFromList(actuators_, oldmodel);
   RemoveFromList(sensors_, oldmodel);
-  RemovePlugins();
 
   // structure changed, the signature is no longer valid
   InvalidateSignature();
@@ -810,6 +825,9 @@ mjCModel& mjCModel::operator+=(mjCDef& subtree) {
 
 // remove default class from array
 mjCModel& mjCModel::operator-=(const mjCDef& subtree) {
+  // check that the default belongs to this model before modifying anything
+  if (subtree.model != this) { throw mjCError(nullptr, "default is not in this model"); }
+
   // check we aren't trying to remove the 'main' default
   if (subtree.id == 0) { throw mjCError(0, "cannot remove the global default ('main')"); }
 
@@ -866,11 +884,15 @@ void deletefromlist(std::vector<T*>* list, mjsElement* element) {
 }
 
 
-// recursively delete all plugins in the subtree
-void mjCModel::DeleteSubtreePlugin(mjCBody* subtree) {
-  mjsPlugin* plugin = &(subtree->spec.plugin);
-  if (plugin->active && plugin->name->empty()) { *this -= plugin->element; }
-  for (auto* body : subtree->Bodies()) { DeleteSubtreePlugin(body); }
+// delete the compiled instances of an asset
+template <class T>
+static void DeleteInstances(std::vector<T*>& instances, const T* primary) {
+  auto of = [primary](T* instance) {
+    if (instance->primary_ != primary) { return false; }
+    delete instance;
+    return true;
+  };
+  instances.erase(std::remove_if(instances.begin(), instances.end(), of), instances.end());
 }
 
 
@@ -886,10 +908,11 @@ void mjCModel::operator-=(mjsElement* el) {
     }
   }
 
-  if (el->elemtype == mjOBJ_BODY) {
-    mjCBody* body  = static_cast<mjCBody*>(el);
-    *this         -= *body;
-  }
+  // plugin instances referenced before the deletion, mjs_bodyToFrame removes the body from the tree
+  mjCBody* body = el->elemtype == mjOBJ_BODY ? static_cast<mjCBody*>(el) : nullptr;
+  std::unordered_set<const mjsElement*> referenced = ReferencedPlugins(body);
+
+  if (body) { *this -= *body; }
 
   // throws before anything is modified if the frame is not in the tree
   if (el->elemtype == mjOBJ_FRAME) {
@@ -900,12 +923,8 @@ void mjCModel::operator-=(mjsElement* el) {
   ResetTreeLists();
 
   switch (el->elemtype) {
-    case mjOBJ_BODY: {
-      MakeTreeLists();  // rebuild lists that were reset at the beginning of the function
-      mjCBody* subtree = static_cast<mjCBody*>(el);
-      DeleteSubtreePlugin(subtree);
-      break;
-    }
+    case mjOBJ_BODY:
+      break;  // removed above
 
     case mjOBJ_FRAME:
       break;  // removed above, frames are meta elements and have no object list
@@ -915,12 +934,9 @@ void mjCModel::operator-=(mjsElement* el) {
       throw mjCError(nullptr, "defaults cannot be deleted, use detach instead");
       break;
 
-    case mjOBJ_GEOM: {
-      mjCGeom* geom = static_cast<mjCGeom*>(el);
-      if (geom->plugin.active && geom->plugin.name->empty()) { *this -= geom->plugin.element; }
-      deletefromlist(&(geom->body->geoms), el);
+    case mjOBJ_GEOM:
+      deletefromlist(&(static_cast<mjCGeom*>(el)->body->geoms), el);
       break;
-    }
 
     case mjOBJ_SITE:
       deletefromlist(&(static_cast<mjCSite*>(el)->body->sites), el);
@@ -938,39 +954,26 @@ void mjCModel::operator-=(mjsElement* el) {
       deletefromlist(&(static_cast<mjCCamera*>(el)->body->cameras), el);
       break;
 
-    case mjOBJ_MESH: {
-      mjCMesh* mesh = static_cast<mjCMesh*>(el);
-      if (mesh->plugin.active && mesh->plugin.name->empty()) { *this -= mesh->plugin.element; }
-      deletefromlist(object_lists_[mjOBJ_MESH], el);
+    case mjOBJ_MESH:
+      DeleteInstances(meshinstances_, static_cast<mjCMesh*>(el));
+      deletefromlist(object_lists_[el->elemtype], el);
       break;
-    }
 
-    case mjOBJ_ACTUATOR: {
-      mjCActuator* actuator = static_cast<mjCActuator*>(el);
-      if (actuator->plugin.active && actuator->plugin.name->empty()) {
-        *this -= actuator->plugin.element;
-      }
-      deletefromlist(object_lists_[mjOBJ_ACTUATOR], el);
+    case mjOBJ_HFIELD:
+      DeleteInstances(hfieldinstances_, static_cast<mjCHField*>(el));
+      deletefromlist(object_lists_[el->elemtype], el);
       break;
-    }
-
-    case mjOBJ_SENSOR: {
-      mjCSensor* sensor = static_cast<mjCSensor*>(el);
-      if (sensor->plugin.active && sensor->plugin.name->empty()) {
-        *this -= sensor->plugin.element;
-      }
-      deletefromlist(object_lists_[mjOBJ_SENSOR], el);
-      break;
-    }
 
     default:
       deletefromlist(object_lists_[el->elemtype], el);
       break;
   }
 
-  ResetTreeLists();  // in case of a nested delete
   MakeTreeLists();
   ProcessLists(/*checkrepeat=*/false);
+
+  // delete the plugin instances that only the removed elements referenced
+  RemovePlugins(referenced);
 
   // structure changed, the signature is no longer valid
   InvalidateSignature();
@@ -1252,6 +1255,8 @@ mjCModel::~mjCModel() {
   for (int i = 0; i < meshes_.size(); i++) meshes_[i]->Release();
   for (int i = 0; i < skins_.size(); i++) skins_[i]->Release();
   for (int i = 0; i < hfields_.size(); i++) hfields_[i]->Release();
+  for (mjCMesh* mesh : meshinstances_) delete mesh;
+  for (mjCHField* hfield : hfieldinstances_) delete hfield;
   for (int i = 0; i < textures_.size(); i++) textures_[i]->Release();
   for (int i = 0; i < materials_.size(); i++) materials_[i]->Release();
   for (int i = 0; i < pairs_.size(); i++) pairs_[i]->Release();
@@ -1316,6 +1321,7 @@ void mjCModel::Clear() {
   nflexbending   = 0;
   nefm0dof       = 0;
   nefm0L         = 0;
+  nefmCvert      = 0;
   nflexelemedge  = 0;
   nflexshelldata = 0;
   nflextexcoord  = 0;
@@ -2026,6 +2032,118 @@ void mjCModel::IndexAssets() {
 }
 
 
+// the meshes and height fields as compiled: those of the spec, then the instances which the
+// compilation made of those used at several scales
+std::vector<mjCMesh*> mjCModel::CompiledMeshes() const {
+  std::vector<mjCMesh*> meshes = meshes_;
+  meshes.insert(meshes.end(), meshinstances_.begin(), meshinstances_.end());
+  return meshes;
+}
+
+
+std::vector<mjCHField*> mjCModel::CompiledHFields() const {
+  std::vector<mjCHField*> hfields = hfields_;
+  hfields.insert(hfields.end(), hfieldinstances_.begin(), hfieldinstances_.end());
+  return hfields;
+}
+
+
+// give each use of an asset the instance of the asset at the scale of the use: the asset itself at
+// the scale of its first use, and instances named after it at the others
+using InstanceMap = std::array<double, 9>;
+
+template <class T>
+static void Instantiate(const mjCModel*                                 model,
+                        mjtObj                                          type,
+                        std::vector<T*>&                                assets,
+                        std::vector<T*>&                                instances,
+                        const std::vector<std::pair<T**, InstanceMap>>& uses,
+                        bool                                            reuse) {
+  if (!reuse) {
+    for (T* instance : instances) { delete instance; }
+    instances.clear();
+    std::unordered_map<const T*, InstanceMap> first;
+    for (const auto& [use, scale] : uses) { first.emplace(*use, scale); }
+    for (T* asset : assets) {
+      auto        it    = first.find(asset);
+      InstanceMap scale = it == first.end() ? InstanceMap{1, 0, 0, 0, 1, 0, 0, 0, 1} : it->second;
+      if (asset->instancemap_ != scale) {
+        asset->instancemap_ = scale;
+        asset->CopyFromSpec();
+      }
+    }
+  }
+
+  for (const auto& [use, scale] : uses) {
+    T* asset = *use;
+    if (asset->instancemap_ == scale) { continue; }
+    auto same = [asset, &scale](const T* instance) {
+      return instance->primary_ == asset && instance->instancemap_ == scale;
+    };
+    auto it = std::find_if(instances.begin(), instances.end(), same);
+    if (it == instances.end()) {
+      if (reuse) { throw mjCError(asset, "no instance of this asset at the scale of its use"); }
+      auto        of   = [asset](const T* instance) { return instance->primary_ == asset; };
+      std::string name = asset->name +
+                         "@" +
+                         std::to_string(1 + std::count_if(instances.begin(), instances.end(), of));
+      if (model->FindObject(type, name)) {
+        throw mjCError(asset, "the name '%s' of an instance of this asset is taken", name.c_str());
+      }
+      T* instance            = new T(*asset);
+      instance->model        = asset->model;
+      instance->compiler     = asset->compiler;
+      instance->name         = name;
+      instance->primary_     = asset;
+      instance->instancemap_ = scale;
+      instance->id           = assets.size() + instances.size();
+      instance->CopyFromSpec();
+      instances.push_back(instance);
+      it = instances.end() - 1;
+    }
+    *use = *it;
+  }
+
+  // reused instances which no use refers to anymore are dropped
+  if (reuse) {
+    std::unordered_set<const T*> used;
+    for (const auto& [use, scale] : uses) { used.insert(*use); }
+    instances.erase(std::remove_if(instances.begin(),
+                                   instances.end(),
+                                   [&used](T* instance) {
+                                     if (used.count(instance)) { return false; }
+                                     delete instance;
+                                     return true;
+                                   }),
+                    instances.end());
+  }
+  for (int i = 0; i < instances.size(); i++) { instances[i]->id = assets.size() + i; }
+}
+
+
+// give the geoms and sites which use a mesh or a height field the instance of the asset at the
+// scale of their use, in the order of their ids, made again unless the assets are reused
+void mjCModel::MakeInstances(bool reuse) {
+  std::vector<std::pair<mjCMesh**, InstanceMap>>   meshuses;
+  std::vector<std::pair<mjCHField**, InstanceMap>> hfielduses;
+  for (mjCGeom* geom : geoms_) {
+    if (geom->mesh) { meshuses.emplace_back(&geom->mesh, geom->ShapeMap()); }
+    if (geom->hfield) { hfielduses.emplace_back(&geom->hfield, geom->ShapeMap()); }
+  }
+  for (mjCSite* site : sites_) {
+    if (site->mesh) { meshuses.emplace_back(&site->mesh, site->ShapeMap()); }
+  }
+  Instantiate(this, mjOBJ_MESH, meshes_, meshinstances_, meshuses, reuse);
+  Instantiate(this, mjOBJ_HFIELD, hfields_, hfieldinstances_, hfielduses, reuse);
+
+  // the instances which sdf geoms use
+  for (mjCMesh* mesh : CompiledMeshes()) { mesh->SetNeedSDF(false); }
+  for (mjCGeom* geom : geoms_) {
+    if (geom->mesh && geom->spec.type == mjGEOM_SDF) { geom->mesh->SetNeedSDF(true); }
+  }
+}
+
+
 // error for an asset without a name; only the XML parser names an asset after its file
 static mjCError EmptyName(const mjCBase* asset, const char* type, const std::string& file) {
   if (file.empty()) { return mjCError(asset, "empty name in %s", type); }
@@ -2078,6 +2196,8 @@ static size_t getpathslength(std::vector<T> list) {
 
 // set array sizes
 void mjCModel::SetSizes() {
+  std::vector<mjCMesh*>   meshes  = CompiledMeshes();
+  std::vector<mjCHField*> hfields = CompiledHFields();
   // set from object list sizes
   nbody    = (int)bodies_.size();
   njnt     = (int)joints_.size();
@@ -2086,9 +2206,9 @@ void mjCModel::SetSizes() {
   ncam     = (int)cameras_.size();
   nlight   = (int)lights_.size();
   nflex    = (int)flexes_.size();
-  nmesh    = (int)meshes_.size();
+  nmesh    = (int)meshes.size();
   nskin    = (int)skins_.size();
-  nhfield  = (int)hfields_.size();
+  nhfield  = (int)hfields.size();
   ntex     = (int)textures_.size();
   nmat     = (int)materials_.size();
   npair    = (int)pairs_.size();
@@ -2139,8 +2259,8 @@ void mjCModel::SetSizes() {
   // nbvh, nbvhstatic, nbvhdynamic
   for (int i = 0; i < nbody; i++) { nbvhstatic += bodies_[i]->tree.Nbvh(); }
   for (int i = 0; i < nmesh; i++) {
-    nbvhstatic += meshes_[i]->tree().Nbvh();
-    noct       += meshes_[i]->octree().NumNodes();
+    nbvhstatic += meshes[i]->tree().Nbvh();
+    noct       += meshes[i]->octree().NumNodes();
   }
   for (int i = 0; i < nflex; i++) { nbvhdynamic += flexes_[i]->tree.Nbvh(); }
   nbvh = nbvhstatic + nbvhdynamic;
@@ -2288,16 +2408,26 @@ void mjCModel::SetSizes() {
     nefm0L   = nnz;
   }
 
+  // sparse metric factor ordering slots, filled by mj_setConst (mj_effCholSetConst): only models
+  // that enable IPC use the factor, on 2D flexes; the covered vertices are disjoint dof triples
+  nefmCvert = 0;
+  if (option.enableflags & mjENBL_IPC) {
+    for (int i = 0; i < nflex; i++) {
+      if (flexes_[i]->dim == 2) { nefmCvert += flexes_[i]->nvert; }
+    }
+    nefmCvert = mjMIN(nefmCvert, nv / 3);
+  }
+
   // mesh counts
   for (int i = 0; i < nmesh; i++) {
-    nmeshvert     += meshes_[i]->nvert();
-    nmeshnormal   += meshes_[i]->nnormal();
-    nmeshface     += meshes_[i]->nface();
-    nmeshtexcoord += (meshes_[i]->HasTexcoord() ? meshes_[i]->ntexcoord() : 0);
-    nmeshgraph    += meshes_[i]->szgraph();
-    nmeshpoly     += meshes_[i]->npolygon();
-    nmeshpolyvert += meshes_[i]->npolygonvert();
-    nmeshpolymap  += meshes_[i]->npolygonmap();
+    nmeshvert     += meshes[i]->nvert();
+    nmeshnormal   += meshes[i]->nnormal();
+    nmeshface     += meshes[i]->nface();
+    nmeshtexcoord += (meshes[i]->HasTexcoord() ? meshes[i]->ntexcoord() : 0);
+    nmeshgraph    += meshes[i]->szgraph();
+    nmeshpoly     += meshes[i]->npolygon();
+    nmeshpolyvert += meshes[i]->npolygonvert();
+    nmeshpolymap  += meshes[i]->npolygonmap();
   }
 
   // skin counts
@@ -2313,7 +2443,7 @@ void mjCModel::SetSizes() {
 
   // nhfielddata
   for (int i = 0; i < nhfield; i++) {
-    nhfielddata += static_cast<mjtSize>(hfields_[i]->nrow) * hfields_[i]->ncol;
+    nhfielddata += static_cast<mjtSize>(hfields[i]->nrow) * hfields[i]->ncol;
   }
 
   // ntexdata
@@ -2366,9 +2496,9 @@ void mjCModel::SetSizes() {
   for (int i = 0; i < ncam; i++)      nnames += (int)cameras_[i]->name.length() + 1;
   for (int i = 0; i < nlight; i++)    nnames += (int)lights_[i]->name.length() + 1;
   for (int i = 0; i < nflex; i++)     nnames += (int)flexes_[i]->name.length() + 1;
-  for (int i = 0; i < nmesh; i++)     nnames += (int)meshes_[i]->name.length() + 1;
+  for (int i = 0; i < nmesh; i++)     nnames += (int)meshes[i]->name.length() + 1;
   for (int i = 0; i < nskin; i++)     nnames += (int)skins_[i]->name.length() + 1;
-  for (int i = 0; i < nhfield; i++)   nnames += (int)hfields_[i]->name.length() + 1;
+  for (int i = 0; i < nhfield; i++)   nnames += (int)hfields[i]->name.length() + 1;
   for (int i = 0; i < ntex; i++)      nnames += (int)textures_[i]->name.length() + 1;
   for (int i = 0; i < nmat; i++)      nnames += (int)materials_[i]->name.length() + 1;
   for (int i = 0; i < npair; i++)     nnames += (int)pairs_[i]->name.length() + 1;
@@ -2386,8 +2516,8 @@ void mjCModel::SetSizes() {
 
   // npaths
   npaths  = 0;
-  npaths += getpathslength(hfields_);
-  npaths += getpathslength(meshes_);
+  npaths += getpathslength(hfields);
+  npaths += getpathslength(meshes);
   npaths += getpathslength(skins_);
   npaths += getpathslength(textures_);
   if (npaths == 0) { npaths = 1; }
@@ -2607,6 +2737,8 @@ static int namelist(vector<T*>& list, int adr, int* name_adr, char* names, int* 
 
 // copy names, compute name addresses
 void mjCModel::CopyNames(mjModel* m) {
+  std::vector<mjCMesh*>   meshes  = CompiledMeshes();
+  std::vector<mjCHField*> hfields = CompiledHFields();
   // start with model name
   int  adr     = (int)modelname_.size() + 1;
   int* map_adr = m->names_map;
@@ -2635,14 +2767,14 @@ void mjCModel::CopyNames(mjModel* m) {
   adr      = namelist(flexes_, adr, m->name_flexadr, m->names, map_adr);
   map_adr += mjLOAD_MULTIPLE * flexes_.size();
 
-  adr      = namelist(meshes_, adr, m->name_meshadr, m->names, map_adr);
-  map_adr += mjLOAD_MULTIPLE * meshes_.size();
+  adr      = namelist(meshes, adr, m->name_meshadr, m->names, map_adr);
+  map_adr += mjLOAD_MULTIPLE * meshes.size();
 
   adr      = namelist(skins_, adr, m->name_skinadr, m->names, map_adr);
   map_adr += mjLOAD_MULTIPLE * skins_.size();
 
-  adr      = namelist(hfields_, adr, m->name_hfieldadr, m->names, map_adr);
-  map_adr += mjLOAD_MULTIPLE * hfields_.size();
+  adr      = namelist(hfields, adr, m->name_hfieldadr, m->names, map_adr);
+  map_adr += mjLOAD_MULTIPLE * hfields.size();
 
   adr      = namelist(textures_, adr, m->name_texadr, m->names, map_adr);
   map_adr += mjLOAD_MULTIPLE * textures_.size();
@@ -2704,12 +2836,14 @@ static int pathlist(vector<T*>& list, int adr, int* path_adr, char* paths) {
 }
 
 void mjCModel::CopyPaths(mjModel* m) {
+  std::vector<mjCMesh*>   meshes  = CompiledMeshes();
+  std::vector<mjCHField*> hfields = CompiledHFields();
   // start with 0 address, unlike m->names m->paths might be empty
   size_t adr  = 0;
   m->paths[0] = 0;
 
-  adr = pathlist(hfields_, adr, m->hfield_pathadr, m->paths);
-  adr = pathlist(meshes_, adr, m->mesh_pathadr, m->paths);
+  adr = pathlist(hfields, adr, m->hfield_pathadr, m->paths);
+  adr = pathlist(meshes, adr, m->mesh_pathadr, m->paths);
   adr = pathlist(skins_, adr, m->skin_pathadr, m->paths);
   adr = pathlist(textures_, adr, m->tex_pathadr, m->paths);
 }
@@ -2749,17 +2883,10 @@ void mjCModel::CopyTree(mjModel* m) {
     m->body_gravcomp[i] = pb->gravcomp;
     mjuu_copyvec(m->body_user + nuser_body * i, pb->get_userdata().data(), nuser_body);
 
-    m->body_contype[i]     = pb->contype;
-    m->body_conaffinity[i] = pb->conaffinity;
-    m->body_margin[i]      = (mjtNum)pb->margin;
-
     // bounding volume hierarchy
     m->body_bvhadr[i] = pb->tree.Nbvh() ? bvh_adr : -1;
     m->body_bvhnum[i] = pb->tree.Nbvh();
     if (pb->tree.Nbvh()) {
-      memcpy(m->bvh_aabb + 6 * bvh_adr,
-             pb->tree.Bvh().data(),
-             6 * pb->tree.Nbvh() * sizeof(mjtNum));
       memcpy(m->bvh_child + 2 * bvh_adr,
              pb->tree.Child().data(),
              2 * pb->tree.Nbvh() * sizeof(int));
@@ -2972,7 +3099,7 @@ void mjCModel::CopyTree(mjModel* m) {
       }
       m->geom_sameframe[gid] = sameframe;
 
-      // compute rbound
+      // bounding sphere of a mesh or SDF geom, mj_setConst computes those of other geoms
       m->geom_rbound[gid] = (mjtNum)pg->GetRBound();
     }
 
@@ -3341,6 +3468,8 @@ int mjCModel::CountNJten(const mjModel* m) {
 // copy objects outside kinematic tree
 // NOLINTBEGIN(readability/fn_size)
 void mjCModel::CopyObjects(mjModel* m) {
+  std::vector<mjCMesh*>   meshes  = CompiledMeshes();
+  std::vector<mjCHField*> hfields = CompiledHFields();
   mjtSize adr, bone_adr, vert_adr, node_adr, normal_adr, face_adr, texcoord_adr, oct_adr;
   mjtSize stiffness_adr, bending_adr;
   mjtSize edge_adr, elem_adr, elemdata_adr, elemedge_adr, shelldata_adr;
@@ -3374,7 +3503,7 @@ void mjCModel::CopyObjects(mjModel* m) {
   polymap_adr  = 0;
   for (int i = 0; i < nmesh; i++) {
     // get pointer
-    mjCMesh* pme = meshes_[i];
+    mjCMesh* pme = meshes[i];
 
     // set fields
     m->mesh_polyadr[i]     = poly_adr;
@@ -3798,7 +3927,7 @@ void mjCModel::CopyObjects(mjModel* m) {
   data_adr = 0;
   for (int i = 0; i < nhfield; i++) {
     // get pointer
-    mjCHField* phf = hfields_[i];
+    mjCHField* phf = hfields[i];
 
     // set fields
     mjuu_copyvec(m->hfield_size + 4 * i, phf->size, 4);
@@ -3930,7 +4059,7 @@ void mjCModel::CopyObjects(mjModel* m) {
     for (int j = 0; j < (int)pte->path.size(); j++) {
       m->wrap_type[adr + j]  = pte->path[j]->Type();
       m->wrap_objid[adr + j] = pte->path[j]->obj ? pte->path[j]->obj->id : -1;
-      m->wrap_prm[adr + j]   = (mjtNum)pte->path[j]->prm;
+      m->wrap_prm[adr + j]   = (mjtNum)(pte->path[j]->prm * pte->path[j]->prmscale);
       if (pte->path[j]->Type() == mjWRAP_SPHERE || pte->path[j]->Type() == mjWRAP_CYLINDER) {
         m->wrap_prm[adr + j] = (mjtNum)pte->path[j]->sideid;
       }
@@ -4272,7 +4401,8 @@ void mjCModel::SaveState(const std::string& state_name,
     }
   }
 
-  // save standard state components
+  // save standard state components; they are restored as they are, so if a frame scale changed
+  // between the compilations, the lengths in the state of what it holds are not rescaled
   SaveState(state_name, d->qpos, d->qvel, d->act, d->ctrl, d->mocap_pos, d->mocap_quat);
 
   // save time and userdata
@@ -5045,8 +5175,19 @@ int mjCModel::FuseStatic(const mjVFS* vfs) {
                           range[0] == parrange[0] &&
                           range[1] == parrange[1];
 
-    // skip if the sum cannot be written: the inertia of the parent is always inferred
-    if (fusemass && !reinfers && par->compiler->inertiafromgeom == mjINERTIAFROMGEOM_TRUE) {
+    // the mass is not fused but the geoms of the body move to the parent: a parent which infers
+    // its inertia from geoms must not gain theirs, e.g. when the body gives a massless inertial,
+    // so the inertia it has now is written to its spec
+    bool keepinertia = !fusemass &&
+                       !reinfers &&
+                       par->name != "world" &&
+                       par->InfersInertial() &&
+                       !body->geoms.empty();
+
+    // skip if the inertia cannot be written: the inertia of the parent is always inferred
+    if ((fusemass || keepinertia) &&
+        !reinfers &&
+        par->compiler->inertiafromgeom == mjINERTIAFROMGEOM_TRUE) {
       continue;
     }
 
@@ -5057,6 +5198,8 @@ int mjCModel::FuseStatic(const mjVFS* vfs) {
       mjuu_copyvec(par->iquat_compiled_, par->iquat, 4);
       par->inertia_adjusted_ |= body->inertia_adjusted_;
       if (!reinfers) { par->AdoptInertial(); }
+    } else if (keepinertia) {
+      par->AdoptInertial();
     }
 
     // the children of the body become children of its parent: update their compiled frames
@@ -5204,6 +5347,9 @@ int mjCModel::DiscardVisual(const mjVFS* vfs) {
       discardgeoms.size() + discardmeshes.size() + discardmaterials.size() + discardtextures.size();
   if (!ndiscard) { return 0; }
 
+  // the plugin instances which elements refer to, before any of them is discarded
+  const std::unordered_set<const mjsElement*> referenced = ReferencedPlugins();
+
   for (mjCBody* body : adopt) { body->AdoptInertial(); }
 
   // materials and textures, and what uses them: one which a sensor or tuple refers to stays as
@@ -5236,14 +5382,6 @@ int mjCModel::DiscardVisual(const mjVFS* vfs) {
   for (mjCMaterial* material : materials_) { material->id = -1; }
   for (mjCTexture* texture : textures_) { texture->id = -1; }
 
-  // the plugin instances which belong to the geoms and meshes, while the lists are whole
-  for (mjCGeom* geom : discardgeoms) {
-    if (geom->plugin.active && geom->plugin.name->empty()) { *this -= geom->plugin.element; }
-  }
-  for (mjCMesh* mesh : discardmeshes) {
-    if (mesh->plugin.active && mesh->plugin.name->empty()) { *this -= mesh->plugin.element; }
-  }
-
   // geoms and meshes; the lists of the tree hold the geoms, empty them before any is released
   ResetTreeLists();
   for (mjCGeom* geom : discardgeoms) {
@@ -5253,6 +5391,7 @@ int mjCModel::DiscardVisual(const mjVFS* vfs) {
   }
   for (mjCMesh* mesh : discardmeshes) {
     meshes_.erase(std::remove(meshes_.begin(), meshes_.end(), mesh), meshes_.end());
+    DeleteInstances(meshinstances_, mesh);
     mesh->id = -1;
     mesh->Release();
   }
@@ -5261,6 +5400,9 @@ int mjCModel::DiscardVisual(const mjVFS* vfs) {
   // update the lists and the maps from names to ids
   MakeTreeLists();
   ProcessLists(/*checkrepeat=*/false);
+
+  // delete the plugin instances which only the discarded geoms and meshes referenced
+  RemovePlugins(referenced);
   InvalidateSignature();
   return ndiscard;
 }
@@ -5308,6 +5450,26 @@ void mjCModel::CopyCompiled(const mjCModel& other) {
     auto it = assets.find(asset);
     return it == assets.end() ? nullptr : it->second;
   };
+  auto instantiate = [&](auto& instances, const auto& source) {
+    for (auto* instance : instances) { delete instance; }
+    instances.clear();
+    for (const auto* instance : source) {
+      using T          = std::remove_const_t<std::remove_pointer_t<decltype(instance)>>;
+      const T* primary = static_cast<const T*>(copied(instance->primary_));
+      if (!primary) { continue; }
+      T* copy        = new T(*instance);
+      copy->model    = this;
+      copy->primary_ = primary;
+      copy->compiler = copy->primary_->compiler;
+      if constexpr (std::is_same_v<T, mjCMesh>) {
+        copy->spec.plugin.element = copy->primary_->spec.plugin.element;
+      }
+      assets[instance] = copy;
+      instances.push_back(copy);
+    }
+  };
+  instantiate(meshinstances_, other.meshinstances_);
+  instantiate(hfieldinstances_, other.hfieldinstances_);
   for (mjCGeom* geom : geoms_) {
     geom->mesh   = static_cast<mjCMesh*>(copied(geom->mesh));
     geom->hfield = static_cast<mjCHField*>(copied(geom->hfield));
@@ -5323,7 +5485,7 @@ void mjCModel::CopyCompiled(const mjCModel& other) {
   };
   for (mjCBody* body : bodies_) { pointplugin(body); }
   for (mjCGeom* geom : geoms_) { pointplugin(geom); }
-  for (mjCMesh* mesh : meshes_) { pointplugin(mesh); }
+  for (mjCMesh* mesh : CompiledMeshes()) { pointplugin(mesh); }
   for (mjCActuator* actuator : actuators_) { pointplugin(actuator); }
   for (mjCSensor* sensor : sensors_) { pointplugin(sensor); }
   for (mjCEquality* equality : equalities_) {
@@ -5686,9 +5848,10 @@ static void CompileTexture(mjCTexture*         texture,
 
 // multi-threaded mesh and texture compilation with shared threadpool
 void mjCModel::CompileMeshesAndTextures(const mjVFS* vfs, bool textures) {
-  int nmesh       = meshes_.size();
-  int ntexture    = textures ? textures_.size() : 0;
-  int total_tasks = nmesh + ntexture;
+  const std::vector<mjCMesh*> meshes      = CompiledMeshes();
+  int                         nmesh       = meshes.size();
+  int                         ntexture    = textures ? textures_.size() : 0;
+  int                         total_tasks = nmesh + ntexture;
 
   // holds exceptions thrown by worker threads
   std::exception_ptr mesh_exception;
@@ -5703,7 +5866,7 @@ void mjCModel::CompileMeshesAndTextures(const mjVFS* vfs, bool textures) {
   if (!compiler.usethread || total_tasks < 2) {
     // Compile meshes serially
     for (int i = 0; i < nmesh; i++) {
-      CompileMesh(meshes_[i], vfs, mesh_exception, mesh_except_mutex, &mesh_warningtext[i]);
+      CompileMesh(meshes[i], vfs, mesh_exception, mesh_except_mutex, &mesh_warningtext[i]);
     }
     // Compile textures serially
     for (int i = 0; i < ntexture; i++) {
@@ -5718,7 +5881,7 @@ void mjCModel::CompileMeshesAndTextures(const mjVFS* vfs, bool textures) {
 
     // Enqueue mesh tasks
     for (int i = 0; i < nmesh; ++i) {
-      pool.Schedule([mesh = meshes_[i],
+      pool.Schedule([mesh = meshes[i],
                      vfs,
                      &mesh_exception,
                      &mesh_except_mutex,
@@ -5768,7 +5931,7 @@ void mjCModel::CompileMeshesAndTextures(const mjVFS* vfs, bool textures) {
   if (texture_exception) { std::rethrow_exception(texture_exception); }
 
   for (int i = 0; i < nmesh; i++) {
-    for (int t = 0; t < mjNCTIMER; t++) { timer[t] += meshes_[i]->mesh_timer_[t]; }
+    for (int t = 0; t < mjNCTIMER; t++) { timer[t] += meshes[i]->mesh_timer_[t]; }
   }
   for (int i = 0; i < ntexture; i++) { timer[mjCTIMER_TEXTURE] += textures_[i]->texture_time_; }
 }
@@ -5856,19 +6019,70 @@ static double* pendingvec(bool stored, std::vector<double>& vec, int size) {
 }
 
 
+// scale a point or a direction in the world, at a top-level body, from the units of the spec to
+// the compiled model, or back
+template <class T>
+static void ScaleInWorld(const mjCBody* body, T* x, bool point, bool inverse) {
+  if (!body->frame) { return; }
+  double y[3] = {(double)x[0], (double)x[1], (double)x[2]};
+  body->frame->ScaleInBody(y, point, inverse);
+  for (int i = 0; i < 3; i++) { x[i] = (T)y[i]; }
+}
+
+
+// scale the vectors of a keyframe from the units of the spec to the compiled model, or back; free
+// joints and mocap bodies are posed in the world, and null vectors are left as they are
+template <class T>
+void mjCModel::ScaleKeyframe(T* qpos, T* qvel, T* act, T* ctrl, T* mpos, bool inverse) const {
+  auto scale = [inverse](T& x, double f) { x = (T)(inverse ? x / f : x * f); };
+  for (const mjCJoint* joint : joints_) {
+    if (joint->qposadr_ < 0) { continue; }
+    if (joint->spec.type == mjJNT_SLIDE) {
+      const double f = joint->Gauge().Stretch(joint->spec.axis);
+      if (qpos) { scale(qpos[joint->qposadr_], f); }
+      if (qvel) { scale(qvel[joint->dofadr_], f); }
+    } else if (joint->spec.type == mjJNT_FREE) {
+      if (qpos) { ScaleInWorld(joint->body, qpos + joint->qposadr_, true, inverse); }
+      if (qvel) { ScaleInWorld(joint->body, qvel + joint->dofadr_, false, inverse); }
+    }
+  }
+  for (const mjCActuator* actuator : actuators_) {
+    for (int j = 0; act && actuator->actadr_ >= 0 && j < actuator->actdim_; j++) {
+      scale(act[actuator->actadr_ + j], actuator->actscale_);
+    }
+    for (int j = 0; ctrl && actuator->ctrladr_ >= 0 && j < actuator->ctrlnum_ && j < 4; j++) {
+      scale(ctrl[actuator->ctrladr_ + j], actuator->ctrlscales_[j]);
+    }
+  }
+  for (const mjCBody* body : bodies_) {
+    if (mpos && body->mocapid >= 0) { ScaleInWorld(body, mpos + 3 * body->mocapid, true, inverse); }
+  }
+}
+
+
 // reassemble the vectors of the pending keyframes, fill in missing default values
 void mjCModel::ResolveKeyframes(const mjModel* m) {
   // store dof offsets in joints and actuators
   SaveDofOffsets();
   keysstored = false;
 
+  // the default configuration, in the units of the spec
+  std::vector<mjtNum> specqpos0(m->qpos0, m->qpos0 + m->nq);
+  std::vector<mjtNum> specbodypos(m->body_pos, m->body_pos + 3 * m->nbody);
+  ScaleKeyframe<mjtNum>(specqpos0.data(), nullptr, nullptr, nullptr, nullptr, /*inverse=*/true);
+  for (int i = 0; i < m->nbody; i++) {
+    if (bodies_[i]->mocapid >= 0) {
+      ScaleInWorld(bodies_[i], specbodypos.data() + 3 * i, true, true);
+    }
+  }
+
   std::vector<std::string> resolved;
   for (mjCKey* key : keys_) {
     if (!key->ispending_) { continue; }
     const mjKeyInfo& info = key->pending_;
     RestoreState(info.name,
-                 m->qpos0,
-                 m->body_pos,
+                 specqpos0.data(),
+                 specbodypos.data(),
                  m->body_quat,
                  pendingvec(info.qpos, key->spec_qpos_, nq),
                  pendingvec(info.qvel, key->spec_qvel_, nv),
@@ -5883,6 +6097,11 @@ void mjCModel::ResolveKeyframes(const mjModel* m) {
 
   // the stored values have served
   for (const std::string& name : resolved) { ForgetState(name); }
+
+  // complete the vectors which are shorter than the model with the default configuration
+  for (mjCKey* key : keys_) {
+    ExpandKeyframe(key, specqpos0.data(), specbodypos.data(), m->body_quat);
+  }
 }
 
 #if defined(__EMSCRIPTEN__) && !defined(MUJOCO_WASM_THREADS)
@@ -5943,15 +6162,16 @@ void mjCModel::CompileTree(const mjVFS* vfs, bool textures, bool keyframes) {
     for (const auto& asset : textures_) asset->CopyFromSpec();
   }
   for (const auto& asset : skins_) asset->CopyFromSpec();
-  for (const auto& asset : hfields_) asset->CopyFromSpec();
   CheckEmptyNames();
 
   // set object ids, check for repeated names
   ProcessLists();
 
-  // map names to asset references
+  // map names to asset references, and give each use the instance of its asset at its scale
   for (mjCMesh* mesh : meshes_) { mesh->SetNeedSDF(false); }
   IndexAssets();
+  MakeInstances(/*reuse=*/!compileassets);
+  for (mjCHField* hfield : CompiledHFields()) { hfield->CopyFromSpec(); }
 
   // compile pairs for convex hull check
   // TODO(quaglino): Consolidate the two calls to pair->Compile() in TryCompile.
@@ -5977,7 +6197,7 @@ void mjCModel::CompileTree(const mjVFS* vfs, bool textures, bool keyframes) {
 
   // convex inertia is computed from the hull, so it is needed whether or not
   // any geom references the mesh
-  for (mjCMesh* mesh : meshes_) {
+  for (mjCMesh* mesh : CompiledMeshes()) {
     if (mesh->spec.inertia == mjMESH_INERTIA_CONVEX) { mesh->SetNeedHull(true); }
   }
 
@@ -6038,13 +6258,13 @@ void mjCModel::TryCompile(mjModel*& m, mjData*& d, const mjVFS* vfs) {
   // compile all other objects except for keyframes
   for (auto flex : flexes_) flex->Compile(vfs);
   for (auto skin : skins_) skin->Compile(vfs);
-  for (auto hfield : hfields_) hfield->Compile(vfs);
+  for (auto hfield : CompiledHFields()) hfield->Compile(vfs);
 
   for (auto material : materials_) material->Compile();
   for (auto pair : pairs_) pair->Compile();
   for (auto exclude : excludes_) exclude->Compile();
-  for (auto equality : equalities_) equality->Compile();
   for (auto tendon : tendons_) tendon->Compile();
+  for (auto equality : equalities_) equality->Compile();
   for (auto actuator : actuators_) actuator->Compile();
   for (auto sensor : sensors_) sensor->Compile();
   for (auto numeric : numerics_) numeric->Compile();
@@ -6062,6 +6282,7 @@ void mjCModel::TryCompile(mjModel*& m, mjData*& d, const mjVFS* vfs) {
 
   // resolve asset references, compute sizes
   IndexAssets();
+  MakeInstances(/*reuse=*/true);
   SetSizes();
   SaveDofOffsets(/*computesize=*/false);  // Populate jnt->dofadr_
 
@@ -6118,6 +6339,7 @@ void mjCModel::TryCompile(mjModel*& m, mjData*& d, const mjVFS* vfs) {
                nflexbending,
                nefm0dof,
                nefm0L,
+               nefmCvert,
                nflexelemedge,
                nflexshelldata,
                nflextexcoord,
@@ -6183,10 +6405,20 @@ void mjCModel::TryCompile(mjModel*& m, mjData*& d, const mjVFS* vfs) {
   // keyframe compilation needs access to nq, nv, na, nmocap, qpos0
   ResolveKeyframes(m);
 
-  // complete the vectors which are shorter than the model with the default configuration
-  for (mjCKey* key : keys_) { ExpandKeyframe(key, m->qpos0, m->body_pos, m->body_quat); }
-
   for (int i = 0; i < keys_.size(); i++) { keys_[i]->Compile(m); }
+
+  // the vectors which a keyframe gives are in the units of the spec
+  for (mjCKey* key : keys_) {
+    auto given = [](std::vector<double>& vec, const std::vector<double>& spec) {
+      return spec.empty() ? nullptr : vec.data();
+    };
+    ScaleKeyframe(given(key->qpos_, key->spec_qpos_),
+                  given(key->qvel_, key->spec_qvel_),
+                  given(key->act_, key->spec_act_),
+                  given(key->ctrl_, key->spec_ctrl_),
+                  given(key->mpos_, key->spec_mpos_),
+                  /*inverse=*/false);
+  }
 
   // copy objects outsite kinematic tree (including keyframes)
   CopyObjects(m);
@@ -6639,12 +6871,40 @@ bool mjCModel::CopyBack(const mjModel* m) {
 // to the spec, each as what compiles to it, and a value which the spec cannot express is an
 // error. Without `write` nothing is copied and only the errors are raised
 void mjCModel::BackValues(const mjModel* m, bool tospec, bool write) {
+  // the compiled values of the element which is being copied, and the inverse of its gauge, which
+  // maps them back to the units of the spec
+  struct {
+    char*                 begin = nullptr;
+    size_t                size  = 0;
+    std::function<void()> inverse;
+  } scaled;
+  auto unscaling = [&](auto* compiled, std::function<void()> inverse) {
+    if (!tospec) { return; }
+    scaled.begin   = reinterpret_cast<char*>(compiled);
+    scaled.size    = sizeof(*compiled);
+    scaled.inverse = std::move(inverse);
+  };
+
+  // write compiled values to the spec, in its units: those of the element which is being copied
+  // are taken from its compiled values as the inverse gauge leaves them
+  auto tospecvalues = [&](auto* value, const auto* element, int n) {
+    const char* p = reinterpret_cast<const char*>(element);
+    if (!scaled.inverse || p < scaled.begin || p >= scaled.begin + scaled.size) {
+      std::copy_n(element, n, value);
+      return;
+    }
+    std::vector<char> saved(scaled.begin, scaled.begin + scaled.size);
+    scaled.inverse();
+    std::copy_n(element, n, value);
+    std::memcpy(scaled.begin, saved.data(), scaled.size);
+  };
+
   // a value which compilation copies to the model as it is; true if the model changed it
   auto copy = [&](auto* value, auto* element, const auto* model, int n = 1) {
     if (!Differs(element, model, n)) { return false; }
     if (write) {
       Back(element, model, n);
-      if (tospec) { std::copy_n(element, n, value); }
+      if (tospec) { tospecvalues(value, element, n); }
     }
     return true;
   };
@@ -6674,8 +6934,10 @@ void mjCModel::BackValues(const mjModel* m, bool tospec, bool write) {
     if (!lower && !upper) { return false; }
     if (write && tospec) {
       Back(element, model, 2);
-      if (lower) { value[0] = scale * element[0]; }
-      if (upper) { value[1] = scale * element[1]; }
+      double range[2];
+      tospecvalues(range, element, 2);
+      if (lower) { value[0] = scale * range[0]; }
+      if (upper) { value[1] = scale * range[1]; }
       if (valuelimited == mjLIMITED_AUTO) {
         bool hasrange = value[0] != 0 || value[1] != 0;
         if ((!settings->autolimits && hasrange) || (value[0] < value[1]) != modellimited) {
@@ -6774,6 +7036,7 @@ void mjCModel::BackValues(const mjModel* m, bool tospec, bool write) {
     mjCJoint* pj      = joints_[i];
     int       qposadr = m->jnt_qposadr[i];
     int       dofadr  = m->jnt_dofadr[i];
+    unscaling(static_cast<mjsJoint*>(pj), [pj] { pj->ApplyGauge(/*inverse=*/true); });
 
     // an angle is in degrees in a spec which says so
     const bool   rotates = pj->type == mjJNT_HINGE || pj->type == mjJNT_BALL;
@@ -6784,10 +7047,10 @@ void mjCModel::BackValues(const mjModel* m, bool tospec, bool write) {
     if (pj->type == mjJNT_SLIDE || pj->type == mjJNT_HINGE) {
       const double scale = pj->type == mjJNT_HINGE ? degrees : 1;
       if (copy(&pj->spec.ref, &pj->ref, m->qpos0 + qposadr) && tospec && write) {
-        pj->spec.ref = scale * pj->ref;
+        pj->spec.ref *= scale;
       }
       if (copy(&pj->spec.springref, &pj->springref, m->qpos_spring + qposadr) && tospec && write) {
-        pj->spec.springref = scale * pj->springref;
+        pj->spec.springref *= scale;
       }
     }
 
@@ -6834,8 +7097,8 @@ void mjCModel::BackValues(const mjModel* m, bool tospec, bool write) {
         write &&
         pj->springdamper[0] > 0 &&
         pj->springdamper[1] > 0) {
-      pj->spec.stiffness[0] = pj->stiffness[0];
-      pj->spec.damping[0]   = pj->damping[0];
+      tospecvalues(pj->spec.stiffness, pj->stiffness, 1);
+      tospecvalues(pj->spec.damping, pj->damping, 1);
       pj->springdamper[0] = pj->springdamper[1] = 0;
       pj->spec.springdamper[0] = pj->spec.springdamper[1] = 0;
     }
@@ -6925,6 +7188,7 @@ void mjCModel::BackValues(const mjModel* m, bool tospec, bool write) {
   // geom
   for (int i = 0; i < ngeom; i++) {
     mjCGeom* pg = geoms_[i];
+    unscaling(static_cast<mjsGeom*>(pg), [pg] { pg->ApplyGauge(/*inverse=*/true); });
 
     // size, pose and surface velocity: the size of a mesh or height field geom is that of the asset
     bool newsize     = Differs(pg->size, m->geom_size + 3 * i, 3);
@@ -6958,8 +7222,9 @@ void mjCModel::BackValues(const mjModel* m, bool tospec, bool write) {
   }
 
   // mesh: the frame which compilation gave it is not something the spec gives
+  const std::vector<mjCMesh*> meshes = CompiledMeshes();
   for (int i = 0; i < nmesh; i++) {
-    mjCMesh* pm = meshes_[i];
+    mjCMesh* pm = meshes[i];
     if (Differs(pm->GetPosPtr(), m->mesh_pos + 3 * i, 3) ||
         Differs(pm->GetQuatPtr(), m->mesh_quat + 4 * i, 4)) {
       refuse(pm, "the frame of a mesh", "it is computed from the mesh");
@@ -6972,12 +7237,25 @@ void mjCModel::BackValues(const mjModel* m, bool tospec, bool write) {
 
   // heightfield: the model holds the elevation data scaled to [0, 1]. Data which the spec gives
   // stays as it was given unless the model changed it, and data which was read from a file is
-  // then given in place of the file
+  // then given in place of the file. A height field which is used at several scales is written
+  // once, from its instances, which must then agree
+  const std::vector<mjCHField*> hfields = CompiledHFields();
   for (int i = 0; i < nhfield; i++) {
-    mjCHField*   ph    = hfields_[i];
+    mjCHField*   ph    = hfields[i];
     const float* model = m->hfield_data + m->hfield_adr[i];
     int          n     = m->hfield_nrow[i] * m->hfield_ncol[i];
     if (!Differs(ph->data.data(), model, n)) { continue; }
+
+    // the instances of the same height field
+    const mjCHField* primary = ph->primary_ ? ph->primary_ : ph;
+    for (int j = 0; j < nhfield; j++) {
+      bool family = hfields[j] == primary || hfields[j]->primary_ == primary;
+      if (family && Differs(m->hfield_data + m->hfield_adr[j], model, n)) {
+        refuse(ph,
+               "the elevation data of an instance of a height field",
+               "the height field is used at several scales, and its instances differ");
+      }
+    }
 
     // compilation scales the data again: only data which it leaves as it is can be given
     float lowest = model[0], highest = model[0];
@@ -6992,7 +7270,7 @@ void mjCModel::BackValues(const mjModel* m, bool tospec, bool write) {
     }
     if (write) {
       Back(ph->data.data(), model, n);
-      if (tospec) {
+      if (tospec && !ph->primary_) {
         ph->userdata_ = ph->data;
         ph->file_.clear();
         ph->content_type_.clear();
@@ -7010,6 +7288,7 @@ void mjCModel::BackValues(const mjModel* m, bool tospec, bool write) {
   // sites
   for (int i = 0; i < nsite; i++) {
     mjCSite* ps = sites_[i];
+    unscaling(static_cast<mjsSite*>(ps), [ps] { ps->ApplyGauge(/*inverse=*/true); });
 
     // size and pose: the size of a mesh site is that of the mesh
     bool newsize     = Differs(ps->size, m->site_size + 3 * i, 3);
@@ -7035,6 +7314,7 @@ void mjCModel::BackValues(const mjModel* m, bool tospec, bool write) {
   for (int i = 0; i < ncam; i++) {
     mjCCamera* pc     = cameras_[i];
     const bool sensor = pc->sensor_size[0] > 0 && pc->sensor_size[1] > 0;
+    unscaling(static_cast<mjsCamera*>(pc), [pc] { pc->ApplyGauge(/*inverse=*/true); });
 
     // pose
     bool position    = Differs(pc->pos, m->cam_pos + 3 * i, 3);
@@ -7072,6 +7352,7 @@ void mjCModel::BackValues(const mjModel* m, bool tospec, bool write) {
   // lights
   for (int i = 0; i < nlight; i++) {
     mjCLight* pl = lights_[i];
+    unscaling(static_cast<mjsLight*>(pl), [pl] { pl->ApplyGauge(/*inverse=*/true); });
 
     // position and direction
     bool position  = Differs(pl->pos, m->light_pos + 3 * i, 3);
@@ -7105,6 +7386,7 @@ void mjCModel::BackValues(const mjModel* m, bool tospec, bool write) {
   // pairs, which the model holds in the order of their ids
   for (mjCPair* pair : pairs_) {
     int i = pair->id;
+    unscaling(static_cast<mjsPair*>(pair), [pair] { pair->ApplyGauge(/*inverse=*/true); });
     copy(pair->spec.solref, pair->solref, m->pair_solref + mjNREF * i, mjNREF);
     copy(pair->spec.solreffriction,
          pair->solreffriction,
@@ -7121,6 +7403,7 @@ void mjCModel::BackValues(const mjModel* m, bool tospec, bool write) {
   for (int i = 0; i < neq; i++) {
     mjCEquality*  pe   = equalities_[i];
     const mjtNum* data = m->eq_data + mjNEQDATA * i;
+    unscaling(static_cast<mjsEquality*>(pe), [pe] { pe->ApplyGauge(/*inverse=*/true); });
 
     if (pe->type == mjEQ_CONNECT && pe->objtype == mjOBJ_BODY) {
       // a connect between bodies: the anchor in the first body is given, and the one in the
@@ -7150,7 +7433,7 @@ void mjCModel::BackValues(const mjModel* m, bool tospec, bool write) {
       if (Differs(pe->data + 3, data + 3, 7) || (anchor && computed)) {
         if (write) {
           Back(pe->data + 3, data + 3, 7);
-          if (tospec) { std::copy_n(pe->data + 3, 7, pe->spec.data + 3); }
+          if (tospec) { tospecvalues(pe->spec.data + 3, pe->data + 3, 7); }
         }
       }
       copy(pe->spec.data + 10, pe->data + 10, data + 10);
@@ -7164,6 +7447,7 @@ void mjCModel::BackValues(const mjModel* m, bool tospec, bool write) {
   // tendons
   for (int i = 0; i < ntendon; i++) {
     mjCTendon* pt = tendons_[i];
+    unscaling(static_cast<mjsTendon*>(pt), [pt] { pt->ApplyGauge(/*inverse=*/true); });
 
     copyrange(pt->spec.range,
               pt->range,
@@ -7198,6 +7482,7 @@ void mjCModel::BackValues(const mjModel* m, bool tospec, bool write) {
   // actuators
   for (int i = 0; i < nactuator; i++) {
     mjCActuator* pa = actuators_[i];
+    unscaling(static_cast<mjsActuator*>(pa), [pa] { pa->ApplyGauge(/*inverse=*/true); });
 
     copy(pa->spec.dynprm, pa->dynprm, m->actuator_dynprm + mjNDYN * i, mjNDYN);
     copy(pa->spec.gainprm, pa->gainprm, m->actuator_gainprm + mjNGAIN * i, mjNGAIN);
@@ -7284,6 +7569,7 @@ void mjCModel::BackValues(const mjModel* m, bool tospec, bool write) {
   // sensors
   for (int i = 0; i < nsensor; i++) {
     mjCSensor* ps = sensors_[i];
+    unscaling(static_cast<mjsSensor*>(ps), [ps] { ps->ApplyGauge(/*inverse=*/true); });
 
     copy(&ps->spec.cutoff, &ps->cutoff, m->sensor_cutoff + i);
     copy(&ps->spec.noise, &ps->noise, m->sensor_noise + i);
@@ -7302,17 +7588,25 @@ void mjCModel::BackValues(const mjModel* m, bool tospec, bool write) {
     copyvector(pt->spec_objprm_, pt->objprm_, m->tuple_objprm + m->tuple_adr[i], m->tuple_size[i]);
   }
 
-  // keyframes
+  // keyframes, in the units of the spec
   for (int i = 0; i < m->nkey; i++) {
     mjCKey* pk = keys_[i];
 
     copy(&pk->spec.time, &pk->time, m->key_time + i);
-    copyvector(pk->spec_qpos_, pk->qpos_, m->key_qpos + i * nq, nq);
-    copyvector(pk->spec_qvel_, pk->qvel_, m->key_qvel + i * nv, nv);
-    copyvector(pk->spec_act_, pk->act_, m->key_act + i * na, na);
-    copyvector(pk->spec_mpos_, pk->mpos_, m->key_mpos + i * 3 * nmocap, 3 * nmocap);
+    bool qpos = copyvector(pk->spec_qpos_, pk->qpos_, m->key_qpos + i * nq, nq);
+    bool qvel = copyvector(pk->spec_qvel_, pk->qvel_, m->key_qvel + i * nv, nv);
+    bool act  = copyvector(pk->spec_act_, pk->act_, m->key_act + i * na, na);
+    bool mpos = copyvector(pk->spec_mpos_, pk->mpos_, m->key_mpos + i * 3 * nmocap, 3 * nmocap);
     copyvector(pk->spec_mquat_, pk->mquat_, m->key_mquat + i * 4 * nmocap, 4 * nmocap);
-    copyvector(pk->spec_ctrl_, pk->ctrl_, m->key_ctrl + i * nu, nu);
+    bool ctrl = copyvector(pk->spec_ctrl_, pk->ctrl_, m->key_ctrl + i * nu, nu);
+    if (tospec && write) {
+      ScaleKeyframe(qpos ? pk->spec_qpos_.data() : nullptr,
+                    qvel ? pk->spec_qvel_.data() : nullptr,
+                    act ? pk->spec_act_.data() : nullptr,
+                    ctrl ? pk->spec_ctrl_.data() : nullptr,
+                    mpos ? pk->spec_mpos_.data() : nullptr,
+                    /*inverse=*/true);
+    }
   }
 }
 

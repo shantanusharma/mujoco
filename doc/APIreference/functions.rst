@@ -203,7 +203,8 @@ the required size. See :ref:`mj_saveXML` for what is saved.
 Save spec to XML file, return 0 on success, -1 otherwise. The compiler attributes
 :ref:`savecompiled<compiler-savecompiled>` and :ref:`savecanonical<compiler-savecanonical>` of the spec say whether
 the model is saved as it was compiled or as it is written in the spec, and in which notation; see
-:ref:`Model Encoding & Saving <meSaving>`. Saving the compiled values requires that the spec first be compiled.
+:ref:`Model Encoding & Saving <meSaving>`. Saving the compiled values requires that the spec first be compiled, and
+compiled again after it is structurally edited (elements added, deleted or attached).
 
 .. _mju_getXMLDependencies:
 
@@ -1557,8 +1558,8 @@ Initialize an empty VFS, :ref:`mj_deleteVFS` must be called to deallocate the VF
 
 .. mujoco-include:: mj_mountVFS
 
-Mount a ResourceProvider to handle file operations under the given path; return 0: success,
-2: repeated name, -1: invalid resource provider.
+Mount a provider to handle file operations under the given path; return 0: success,
+2: repeated name, -1: invalid provider.
 
 .. _mj_unmountVFS:
 
@@ -1567,7 +1568,7 @@ Mount a ResourceProvider to handle file operations under the given path; return 
 
 .. mujoco-include:: mj_unmountVFS
 
-Unmount a previously mounted ResourceProvider; return 0: success, -1: not found in VFS.
+Unmount a previously mounted provider; return 0: success, -1: not found in VFS.
 
 .. _mj_addFileVFS:
 
@@ -1693,7 +1694,7 @@ These functions provide the means to query the resource provider and obtain reso
 
 .. mujoco-include:: mju_openResource
 
-Open a resource; if the name doesn't have a prefix matching a registered resource provider,
+Open a resource; if the name doesn't have a prefix matching a registered provider,
 then the OS filesystem is used.
 
 *Nullable:* ``dir``, ``vfs``, ``error``
@@ -1724,7 +1725,7 @@ return negative value if error.
 
 .. mujoco-include:: mju_writeResource
 
-Write resource data via its resource provider, return bytes written or -1 on error.
+Write resource data via its provider, return bytes written or -1 on error.
 
 *Nullable:* ``vfs``, ``error``
 
@@ -1759,7 +1760,9 @@ Find the decoder for a resource and return the decoded spec.
 
 The caller takes ownership of the spec and is responsible for cleaning it up.
 
-*Nullable:* ``vfs``
+On failure, return NULL and write the reason to error.
+
+*Nullable:* ``vfs``, ``error``
 
 .. _Initialization:
 
@@ -3197,14 +3200,14 @@ Gets active renderer information for the given filament context.
 
 Initializes the mjrfRenderRequest to default values.
 
-.. _mjrf_defaultReadPixelsRequest:
+.. _mjrf_defaultReadRequest:
 
-`mjrf_defaultReadPixelsRequest <#mjrf_defaultReadPixelsRequest>`__
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+`mjrf_defaultReadRequest <#mjrf_defaultReadRequest>`__
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-.. mujoco-include:: mjrf_defaultReadPixelsRequest
+.. mujoco-include:: mjrf_defaultReadRequest
 
-Initializes the mjrfReadPixelsRequest to default values.
+Initializes the mjrfReadRequest to default values.
 
 .. _mjrf_render:
 
@@ -3276,7 +3279,7 @@ Initializes the mjrfTextureConfig to default values.
 .. mujoco-include:: mjrf_createTexture
 
 Creates a filament texture. Note that the texture will not be created on the GPU until
-`mjrf_setTextureData()` is called.
+`mjrf_uploadTexture()` is called.
 
 .. _mjrf_destroyTexture:
 
@@ -3296,12 +3299,12 @@ Destroys the texture.
 
 Initializes the mjrfTextureData to default values.
 
-.. _mjrf_setTextureData:
+.. _mjrf_uploadTexture:
 
-`mjrf_setTextureData <#mjrf_setTextureData>`__
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+`mjrf_uploadTexture <#mjrf_uploadTexture>`__
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-.. mujoco-include:: mjrf_setTextureData
+.. mujoco-include:: mjrf_uploadTexture
 
 Uploads the given texture data to the texture.
 
@@ -3369,12 +3372,12 @@ Destroys the mesh.
 
 Initializes the mjrfMeshData to default values.
 
-.. _mjrf_setMeshData:
+.. _mjrf_uploadMesh:
 
-`mjrf_setMeshData <#mjrf_setMeshData>`__
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+`mjrf_uploadMesh <#mjrf_uploadMesh>`__
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-.. mujoco-include:: mjrf_setMeshData
+.. mujoco-include:: mjrf_uploadMesh
 
 Uploads the given mesh data to the mesh.
 
@@ -3405,39 +3408,39 @@ Creates a scene with the given parameters.
 
 Destroys the scene.
 
-.. _mjrf_addLightToScene:
+.. _mjrf_addSceneLight:
 
-`mjrf_addLightToScene <#mjrf_addLightToScene>`__
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+`mjrf_addSceneLight <#mjrf_addSceneLight>`__
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-.. mujoco-include:: mjrf_addLightToScene
+.. mujoco-include:: mjrf_addSceneLight
 
 Adds a light to the scene.
 
-.. _mjrf_removeLightFromScene:
+.. _mjrf_removeSceneLight:
 
-`mjrf_removeLightFromScene <#mjrf_removeLightFromScene>`__
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+`mjrf_removeSceneLight <#mjrf_removeSceneLight>`__
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-.. mujoco-include:: mjrf_removeLightFromScene
+.. mujoco-include:: mjrf_removeSceneLight
 
 Removes the light from the scene.
 
-.. _mjrf_addRenderableToScene:
+.. _mjrf_addSceneRenderable:
 
-`mjrf_addRenderableToScene <#mjrf_addRenderableToScene>`__
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+`mjrf_addSceneRenderable <#mjrf_addSceneRenderable>`__
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-.. mujoco-include:: mjrf_addRenderableToScene
+.. mujoco-include:: mjrf_addSceneRenderable
 
 Adds a renderable to the scene.
 
-.. _mjrf_removeRenderableFromScene:
+.. _mjrf_removeSceneRenderable:
 
-`mjrf_removeRenderableFromScene <#mjrf_removeRenderableFromScene>`__
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+`mjrf_removeSceneRenderable <#mjrf_removeSceneRenderable>`__
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-.. mujoco-include:: mjrf_removeRenderableFromScene
+.. mujoco-include:: mjrf_removeSceneRenderable
 
 Removes the renderable from the scene.
 
@@ -3458,6 +3461,15 @@ Sets the skybox (cube texture) for the scene.
 .. mujoco-include:: mjrf_configureSceneFromModel
 
 Configures the scene based on the parameters in an mjModel.
+
+.. _mjrf_setSceneMsaa:
+
+`mjrf_setSceneMsaa <#mjrf_setSceneMsaa>`__
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+.. mujoco-include:: mjrf_setSceneMsaa
+
+Sets the number of multi-sample anti-aliasing samples; values <= 1 disable MSAA.
 
 .. _mjrf_defaultLightParams:
 
@@ -3486,21 +3498,21 @@ Creates a light for the filament renderer.
 
 Destroys the light.
 
-.. _mjrf_setLightEnabled:
+.. _mjrf_setLightActive:
 
-`mjrf_setLightEnabled <#mjrf_setLightEnabled>`__
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+`mjrf_setLightActive <#mjrf_setLightActive>`__
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-.. mujoco-include:: mjrf_setLightEnabled
+.. mujoco-include:: mjrf_setLightActive
 
-Enables or disables the light.
+Activates or deactivates the light.
 
-.. _mjrf_setLightShadowsEnabled:
+.. _mjrf_setLightCastShadow:
 
-`mjrf_setLightShadowsEnabled <#mjrf_setLightShadowsEnabled>`__
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+`mjrf_setLightCastShadow <#mjrf_setLightCastShadow>`__
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-.. mujoco-include:: mjrf_setLightShadowsEnabled
+.. mujoco-include:: mjrf_setLightCastShadow
 
 Enables or disables whether or not the light casts shadows.
 
@@ -3531,12 +3543,12 @@ Sets the intensity of the light, in candela.
 
 Sets the effective range of the light, in meters.
 
-.. _mjrf_setLightCutoffAngle:
+.. _mjrf_setLightCutoff:
 
-`mjrf_setLightCutoffAngle <#mjrf_setLightCutoffAngle>`__
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+`mjrf_setLightCutoff <#mjrf_setLightCutoff>`__
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-.. mujoco-include:: mjrf_setLightCutoffAngle
+.. mujoco-include:: mjrf_setLightCutoff
 
 Sets the cutoff angle of the light, in degrees. Only used for spot lights.
 
@@ -3558,15 +3570,6 @@ Sets the softness of the light, in the range [0, 1]. Only used for spot lights.
 
 Sets the radius of the light bulb.
 
-.. _mjrf_setLightBlurWidth:
-
-`mjrf_setLightBlurWidth <#mjrf_setLightBlurWidth>`__
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-
-.. mujoco-include:: mjrf_setLightBlurWidth
-
-Sets the width of the blur applied to the light's shadow map, in texels.
-
 .. _mjrf_setLightShadowMapSize:
 
 `mjrf_setLightShadowMapSize <#mjrf_setLightShadowMapSize>`__
@@ -3576,12 +3579,12 @@ Sets the width of the blur applied to the light's shadow map, in texels.
 
 Sets the resolution of the light's shadow map, in texels.
 
-.. _mjrf_setLightTransform:
+.. _mjrf_setLightPose:
 
-`mjrf_setLightTransform <#mjrf_setLightTransform>`__
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+`mjrf_setLightPose <#mjrf_setLightPose>`__
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-.. mujoco-include:: mjrf_setLightTransform
+.. mujoco-include:: mjrf_setLightPose
 
 Sets the position and direction of the light.
 
@@ -3669,14 +3672,14 @@ Sets the material properties and textures of the renderable.
 
 Copies the material properties of the renderable into the given mjrfMaterial.
 
-.. _mjrf_setRenderableTransform:
+.. _mjrf_setRenderablePose:
 
-`mjrf_setRenderableTransform <#mjrf_setRenderableTransform>`__
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+`mjrf_setRenderablePose <#mjrf_setRenderablePose>`__
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-.. mujoco-include:: mjrf_setRenderableTransform
+.. mujoco-include:: mjrf_setRenderablePose
 
-Sets the transform position and rotation of the renderable.
+Sets the position and rotation of the renderable.
 
 .. _mjrf_setRenderableSize:
 
@@ -3696,7 +3699,7 @@ the scale. However, for some geom-based renderables, the size scale is not appli
 
 .. mujoco-include:: mjrf_defaultRenderTargetConfig
 
-Initializes the RenderTargetConfig to default values.
+Initializes the mjrfRenderTargetConfig to default values.
 
 .. _mjrf_createRenderTarget:
 
@@ -4055,55 +4058,55 @@ Look up a plugin by name. If slot is not NULL, also write its registered slot nu
 
 Look up a plugin by the registered slot number that was returned by mjp_registerPlugin.
 
-.. _mjp_defaultResourceProvider:
+.. _mjp_defaultProvider:
 
-`mjp_defaultResourceProvider <#mjp_defaultResourceProvider>`__
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+`mjp_defaultProvider <#mjp_defaultProvider>`__
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-.. mujoco-include:: mjp_defaultResourceProvider
+.. mujoco-include:: mjp_defaultProvider
 
-Set default resource provider definition.
+Set default provider definition.
 
-.. _mjp_registerResourceProvider:
+.. _mjp_registerProvider:
 
-`mjp_registerResourceProvider <#mjp_registerResourceProvider>`__
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+`mjp_registerProvider <#mjp_registerProvider>`__
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-.. mujoco-include:: mjp_registerResourceProvider
+.. mujoco-include:: mjp_registerProvider
 
-Globally register a resource provider in a thread-safe manner. The provider must have a prefix
+Globally register a provider in a thread-safe manner. The provider must have a prefix
 that is not a sub-prefix or super-prefix of any current registered providers.
 
 Return a slot number >= 0 on success, -1 on failure.
 
-.. _mjp_resourceProviderCount:
+.. _mjp_providerCount:
 
-`mjp_resourceProviderCount <#mjp_resourceProviderCount>`__
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+`mjp_providerCount <#mjp_providerCount>`__
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-.. mujoco-include:: mjp_resourceProviderCount
+.. mujoco-include:: mjp_providerCount
 
-Return the number of globally registered resource providers.
+Return the number of globally registered providers.
 
-.. _mjp_getResourceProvider:
+.. _mjp_findProvider:
 
-`mjp_getResourceProvider <#mjp_getResourceProvider>`__
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+`mjp_findProvider <#mjp_findProvider>`__
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-.. mujoco-include:: mjp_getResourceProvider
+.. mujoco-include:: mjp_findProvider
 
-Return the resource provider with the prefix that matches against the resource name.
+Return the provider with the prefix that matches against the resource name.
 
 If no match, return NULL.
 
-.. _mjp_getResourceProviderAtSlot:
+.. _mjp_getProviderAtSlot:
 
-`mjp_getResourceProviderAtSlot <#mjp_getResourceProviderAtSlot>`__
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+`mjp_getProviderAtSlot <#mjp_getProviderAtSlot>`__
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-.. mujoco-include:: mjp_getResourceProviderAtSlot
+.. mujoco-include:: mjp_getProviderAtSlot
 
-Look up a resource provider by slot number returned by mjp_registerResourceProvider.
+Look up a provider by slot number returned by mjp_registerProvider.
 
 If invalid slot number, return NULL.
 
@@ -4136,7 +4139,7 @@ Set default resource decoder definition.
 
 .. mujoco-include:: mjp_findDecoder
 
-Return the resource provider with the prefix that matches against the resource name.
+Return the decoder that matches against the resource or content type.
 
 If no match, return NULL.
 
@@ -4173,35 +4176,35 @@ Return the encoder that matches against the content type or filename extension.
 
 If no match, return NULL.
 
-.. _mjp_registerArchiveResourceProvider:
+.. _mjp_registerArchiveProvider:
 
-`mjp_registerArchiveResourceProvider <#mjp_registerArchiveResourceProvider>`__
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+`mjp_registerArchiveProvider <#mjp_registerArchiveProvider>`__
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-.. mujoco-include:: mjp_registerArchiveResourceProvider
+.. mujoco-include:: mjp_registerArchiveProvider
 
-Globally register an archive resource provider. This function is thread-safe.
+Globally register an archive provider. This function is thread-safe.
 provider->prefix specifies the filename extension(s) (e.g. .mjz|.zip).
 
-.. _mjp_findArchiveResourceProvider:
+.. _mjp_findArchiveProvider:
 
-`mjp_findArchiveResourceProvider <#mjp_findArchiveResourceProvider>`__
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+`mjp_findArchiveProvider <#mjp_findArchiveProvider>`__
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-.. mujoco-include:: mjp_findArchiveResourceProvider
+.. mujoco-include:: mjp_findArchiveProvider
 
-Return the archive resource provider that matches against the resource name.
+Return the archive provider that matches against the resource name.
 
 If no match, return NULL.
 
-.. _mjp_archiveResourceProviderCount:
+.. _mjp_archiveProviderCount:
 
-`mjp_archiveResourceProviderCount <#mjp_archiveResourceProviderCount>`__
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+`mjp_archiveProviderCount <#mjp_archiveProviderCount>`__
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-.. mujoco-include:: mjp_archiveResourceProviderCount
+.. mujoco-include:: mjp_archiveProviderCount
 
-Return the number of globally registered archive resource providers.
+Return the number of globally registered archive providers.
 
 .. _Thread:
 
@@ -5249,7 +5252,8 @@ Add frame to body.
 .. mujoco-include:: mjs_delete
 
 Remove object corresponding to the given element; return 0 on success. Deleting a body or a frame also deletes
-everything inside it, along with all the elements that reference a deleted element.
+everything inside it, along with all the elements that reference a deleted element. A
+:ref:`plugin instance<plugin-instance>` is deleted along with the last element that references it.
 
 .. _AddNonTreeElements:
 
@@ -5291,9 +5295,10 @@ Add flex.
 
 .. mujoco-include:: mjs_makeFlex
 
-Add flexcomp: create flex with auto-generated bodies/joints, return flex spec.
-
-*Nullable:* ``type``, ``dof``, ``count``, ``cellcount``, ``spacing``, ``scale``, ``pos``, ``quat``, ``origin``, ``file``, ``vfs``
+Create a :ref:`flexcomp<body-flexcomp>` in ``body`` and return the resulting flex; the arguments correspond to the
+flexcomp attributes. If ``file`` is the name of an existing :ref:`mesh asset<asset-mesh>`, the flexcomp uses that mesh as
+with the :ref:`mesh<body-flexcomp-mesh>` attribute, otherwise ``file`` is the name of a mesh file. The flexcomp is
+expanded immediately, so later changes to the mesh asset do not affect the created flex.
 
 .. _mjs_addPair:
 
@@ -5594,7 +5599,24 @@ Add material.
 
 .. mujoco-include:: mjs_makeMesh
 
-Sets the vertices and normals of a mesh.
+Generate a built-in procedural mesh of type :ref:`mjtMeshBuiltin` with the given parameters. Returns 0 on success; on
+failure, returns a nonzero value and sets the error of the spec. The parameters of the sphere, hemisphere, cone,
+supersphere, supertorus, wedge and plate types are those of the corresponding :ref:`mesh/builtin<asset-mesh-builtin>`
+attribute. The procedural types below generate the same shapes as the corresponding :ref:`flexcomp<body-flexcomp>`
+types; their nodes are stored in double precision in ``usernode``.
+
+- ``mjMESH_BUILTIN_GRID`` (count[3], spacing[3], [dim]): A regular grid with ``count[i] > 0`` points along each axis,
+  separated by ``spacing[i]``. ``dim`` (default 3) creates tetrahedra (3) or triangles (2);
+  ``count`` must be 1 along the axes beyond ``dim``.
+- ``mjMESH_BUILTIN_BOX``, ``mjMESH_BUILTIN_CYLINDER``, ``mjMESH_BUILTIN_ELLIPSOID`` (count[3], spacing[3], [dim]): The
+  surface of a box grid with ``count[i] >= 2`` points along each axis, projected onto the shape. ``dim`` (default 3)
+  creates tetrahedra connecting the surface to the center (3) or surface triangles (2).
+- ``mjMESH_BUILTIN_SQUARE``, ``mjMESH_BUILTIN_DISC`` (count[3], spacing[3]): A triangulated square, or a disc obtained by
+  radial projection of the square; ``count[2]`` must be 1.
+
+Types without volume (square, disc, and
+grid, box, cylinder and ellipsoid with ``dim`` < 3) change a ``legacy`` :ref:`inertia<asset-mesh-inertia>` to
+``shell``.
 
 .. _FindAndGetUtilities:
 

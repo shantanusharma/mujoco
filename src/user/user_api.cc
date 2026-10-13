@@ -104,6 +104,15 @@ mjSpec* mj_parse(
   // or that are fetched on a need-be basis via URI.
   if (resource) {
     cleanup += [resource]() { mju_closeResource(resource); };
+
+    // A resource provider may only determine the content's format when it
+    // opens the resource, and record it as the extension of the resource's
+    // name (e.g. mjdb://kind/origin/uid becomes mjdb://kind/origin/uid.xml).
+    // XML has no decoder, so hand such resources to the XML parser.
+    auto resolved = mujoco::user::FilePath(resource->name);
+    if (resolved.Ext() == ".xml" || resolved.Ext() == ".urdf") {
+      return mj_parseXML(filename, vfs, error, error_sz);
+    }
   } else {
     resource  = (mjResource*)mju_malloc(sizeof(mjResource));
     cleanup  += [resource]() {
@@ -139,9 +148,9 @@ mjSpec* mj_parse(
     memcpy(resource->name, fullname.c_str(), sizeof(char) * (n + 1));
   }
 
-  mjSpec* spec = mju_decodeResource(resource, content_type, vfs);
+  mjSpec* spec = mju_decodeResource(resource, content_type, vfs, error, error_sz);
   if (spec == nullptr) {
-    if (error) {
+    if (error && error_sz > 0 && !error[0]) {
       strncpy(error, "could not decode content", error_sz);
       error[error_sz - 1] = '\0';
     }
@@ -894,12 +903,14 @@ mjsFlex* mjs_makeFlex(mjsBody*     body,
     fcomp.scale[2] = scale[2];
   }
   if (origin) {
-    fcomp.origin[0] = origin[0];
-    fcomp.origin[1] = origin[1];
-    fcomp.origin[2] = origin[2];
+    fcomp.has_origin = true;
+    fcomp.origin[0]  = origin[0];
+    fcomp.origin[1]  = origin[1];
+    fcomp.origin[2]  = origin[2];
   }
 
   // physics
+  fcomp.has_dim               = (dim > 0);
   fcomp.def.spec.flex->dim    = dim;
   fcomp.def.spec.flex->radius = radius;
   if (mass > 0) fcomp.mass = mass;
@@ -923,8 +934,16 @@ mjsFlex* mjs_makeFlex(mjsBody*     body,
     fcomp.quat[3] = quat[3];
   }
 
-  // file
-  if (file) { fcomp.file = file; }
+  // file is the name of a mesh asset if one exists, otherwise a file name
+  if (file) {
+    if (model->FindObject(mjOBJ_MESH, file)) {
+      fcomp.mesh = file;
+      if (!type) { fcomp.type = mjFCOMPTYPE_MESH; }
+    } else {
+      fcomp.file         = file;
+      fcomp.file_or_mesh = true;
+    }
+  }
 
   // call Make
   char error[500] = "";
@@ -1138,6 +1157,119 @@ int mjs_makeMesh(mjsMesh* mesh, mjtMeshBuiltin builtin, double* params, int npar
       return 0;
     }
 
+    case mjMESH_BUILTIN_GRID: {
+      if (nparams != 6 && nparams != 7) {
+        m->SetError(
+            mjCError(0, "Grid mesh type requires 6 or 7 parameters (count[3], spacing[3], [dim])"));
+        return -1;
+      }
+      int    count[3]   = {static_cast<int>(params[0]),
+                           static_cast<int>(params[1]),
+                           static_cast<int>(params[2])};
+      double spacing[3] = {params[3], params[4], params[5]};
+      int    dim        = (nparams == 7) ? static_cast<int>(params[6]) : 3;
+      if (dim < 2 || dim > 3) {
+        m->SetError(mjCError(0, "Grid dim must be 2 or 3"));
+        return -1;
+      }
+      for (int i = 0; i < dim; i++) {
+        if (count[i] < 1) {
+          m->SetError(mjCError(0, "Grid count must be positive"));
+          return -1;
+        }
+      }
+      for (int i = dim; i < 3; i++) {
+        if (count[i] != 1) {
+          m->SetError(mjCError(0, "Grid count must be 1 along dimensions beyond dim"));
+          return -1;
+        }
+      }
+      meshC->MakeGrid(count, spacing, dim, false);
+      if ((dim == 3 ? mesh->usertet : mesh->userface)->empty()) {
+        m->SetError(mjCError(0, "Failed to create grid mesh"));
+        return -1;
+      }
+      if (dim < 3 && mesh->inertia == mjMESH_INERTIA_LEGACY) {
+        mesh->inertia = mjMESH_INERTIA_SHELL;
+      }
+      return 0;
+    }
+
+    case mjMESH_BUILTIN_BOX:
+    case mjMESH_BUILTIN_CYLINDER:
+    case mjMESH_BUILTIN_ELLIPSOID: {
+      if (nparams != 6 && nparams != 7) {
+        m->SetError(mjCError(0,
+                             "Box/cylinder/ellipsoid mesh type requires 6 or 7 parameters "
+                             "(count[3], spacing[3], [dim])"));
+        return -1;
+      }
+      int    count[3]   = {static_cast<int>(params[0]),
+                           static_cast<int>(params[1]),
+                           static_cast<int>(params[2])};
+      double spacing[3] = {params[3], params[4], params[5]};
+      int    dim        = (nparams == 7) ? static_cast<int>(params[6]) : 3;
+      if (dim < 2 || dim > 3) {
+        m->SetError(mjCError(0, "Mesh dim must be 2 or 3 for box/cylinder/ellipsoid"));
+        return -1;
+      }
+      for (int i = 0; i < 3; i++) {
+        if (count[i] < 2) {
+          m->SetError(mjCError(0, "Box/cylinder/ellipsoid count must be at least 2"));
+          return -1;
+        }
+      }
+      if (builtin == mjMESH_BUILTIN_BOX) {
+        meshC->MakeBox(count, spacing, dim, false, true);
+      } else if (builtin == mjMESH_BUILTIN_CYLINDER) {
+        meshC->MakeCylinder(count, spacing, dim, false, true);
+      } else {
+        meshC->MakeEllipsoid(count, spacing, dim, false, true);
+      }
+      if ((dim == 3 ? mesh->usertet : mesh->userface)->empty()) {
+        m->SetError(mjCError(0, "Failed to create box/cylinder/ellipsoid mesh"));
+        return -1;
+      }
+      if (dim < 3 && mesh->inertia == mjMESH_INERTIA_LEGACY) {
+        mesh->inertia = mjMESH_INERTIA_SHELL;
+      }
+      return 0;
+    }
+
+    case mjMESH_BUILTIN_SQUARE:
+    case mjMESH_BUILTIN_DISC: {
+      if (nparams != 6) {
+        m->SetError(
+            mjCError(0, "Square/disc mesh type requires 6 parameters (count[3], spacing[3])"));
+        return -1;
+      }
+      int    count[3]   = {static_cast<int>(params[0]),
+                           static_cast<int>(params[1]),
+                           static_cast<int>(params[2])};
+      double spacing[3] = {params[3], params[4], params[5]};
+      for (int i = 0; i < 2; i++) {
+        if (count[i] < 1) {
+          m->SetError(mjCError(0, "Count must be positive"));
+          return -1;
+        }
+      }
+      if (count[2] != 1) {
+        m->SetError(mjCError(0, "Square/disc count[2] must be 1"));
+        return -1;
+      }
+      if (builtin == mjMESH_BUILTIN_SQUARE) {
+        meshC->MakeGrid(count, spacing, 2, false);
+      } else {
+        meshC->MakeDisc(count, spacing, false);
+      }
+      if (mesh->userface->empty()) {
+        m->SetError(mjCError(0, "Failed to create square/disc mesh"));
+        return -1;
+      }
+      if (mesh->inertia == mjMESH_INERTIA_LEGACY) { mesh->inertia = mjMESH_INERTIA_SHELL; }
+      return 0;
+    }
+
     default:
       m->SetError(mjCError(0, "Unsupported mesh type"));
       return 1;
@@ -1283,15 +1415,27 @@ mjsDefault* mjs_addDefault(mjSpec* s, const char* classname, const mjsDefault* p
 }
 
 
+// a shortcut owns the control model and its activation layout: start them from the general defaults
+static void SetControl(mjsActuator* actuator, mjtActuator type) {
+  mjuu_zerovec(actuator->gainprm, mjNGAIN);
+  mjuu_zerovec(actuator->biasprm, mjNBIAS);
+  mjuu_zerovec(actuator->dynprm, mjNDYN);
+  actuator->gainprm[0] = 1;
+  actuator->dynprm[0]  = 1;
+  actuator->gaintype   = mjGAIN_FIXED;
+  actuator->biastype   = mjBIAS_NONE;
+  actuator->dyntype    = mjDYN_NONE;
+  actuator->ctrlspec   = 0;
+  actuator->actdim     = -1;
+  actuator->actearly   = 0;
+  actuator->actlimited = mjLIMITED_AUTO;
+  actuator->type       = type;
+}
+
+
 // set actuator to motor
 const char* mjs_setToMotor(mjsActuator* actuator) {
-  // unit gain
-  actuator->gainprm[0] = 1;
-
-  // implied parameters
-  actuator->dyntype  = mjDYN_NONE;
-  actuator->gaintype = mjGAIN_FIXED;
-  actuator->biastype = mjBIAS_NONE;
+  SetControl(actuator, mjACTUATOR_MOTOR);
   return "";
 }
 
@@ -1303,6 +1447,7 @@ const char* mjs_setToPosition(mjsActuator* actuator,
                               double       dampratio[1],
                               double       timeconst[1],
                               double       inheritrange) {
+  SetControl(actuator, mjACTUATOR_POSITION);
   actuator->gainprm[0] = kp;
   actuator->biasprm[1] = -kp;
 
@@ -1330,6 +1475,7 @@ const char* mjs_setToPosition(mjsActuator* actuator,
     }
   }
 
+  actuator->ctrlspec = mjINPUT_POS;
   actuator->gaintype = mjGAIN_FIXED;
   actuator->biastype = mjBIAS_AFFINE;
   return "";
@@ -1346,7 +1492,9 @@ const char* mjs_setToIntVelocity(mjsActuator* actuator,
   // inheritrange sets actrange, not ctrlrange: skip the position range check
   const char* err = mjs_setToPosition(actuator, kp, kv, dampratio, timeconst, 0);
   if (err[0]) return err;
+  actuator->ctrlspec     = mjINPUT_VEL;
   actuator->dyntype      = mjDYN_INTEGRATOR;
+  actuator->type         = mjACTUATOR_INTVELOCITY;
   actuator->inheritrange = inheritrange;
 
   if (inheritrange > 0) {
@@ -1362,6 +1510,7 @@ const char* mjs_setToIntVelocity(mjsActuator* actuator,
 const char* mjs_setToOrientation(
     mjsActuator* actuator, double kp, double kv[1], double dampratio[1], int ctrlspec) {
   if (kv && dampratio) { return "kv and dampratio cannot both be defined"; }
+  SetControl(actuator, mjACTUATOR_ORIENTATION);
   actuator->gainprm[0] = kp;
   actuator->biasprm[1] = -kp;
   if (kv) {
@@ -1391,6 +1540,7 @@ const char* mjs_setToPID(mjsActuator* actuator,
                          double       inheritrange,
                          int          ctrlspec) {
   if (kv && dampratio) { return "kv and dampratio cannot both be defined"; }
+  SetControl(actuator, mjACTUATOR_PID);
   actuator->biasprm[1] = -kp;
   if (kv) {
     if (*kv < 0) return "kv cannot be negative";
@@ -1408,7 +1558,7 @@ const char* mjs_setToPID(mjsActuator* actuator,
   actuator->gainprm[0] = ki_value;
   actuator->dynprm[1]  = slew_value;
   actuator->dyntype    = (ki_value || slew_value) ? mjDYN_PID : mjDYN_NONE;
-  if (ki_value && imax) { actuator->dynprm[0] = *imax; }
+  actuator->dynprm[0]  = (ki_value && imax) ? *imax : 0;
 
   actuator->inheritrange = inheritrange;
   if (inheritrange > 0) {
@@ -1426,11 +1576,10 @@ const char* mjs_setToPID(mjsActuator* actuator,
 
 // Set to velocity actuator.
 const char* mjs_setToVelocity(mjsActuator* actuator, double kv) {
-  mjuu_zerovec(actuator->biasprm, mjNBIAS);
+  SetControl(actuator, mjACTUATOR_VELOCITY);
   actuator->gainprm[0] = kv;
   actuator->biasprm[2] = -kv;
-  actuator->dyntype    = mjDYN_NONE;
-  actuator->gaintype   = mjGAIN_FIXED;
+  actuator->ctrlspec   = mjINPUT_VEL;
   actuator->biastype   = mjBIAS_AFFINE;
   return "";
 }
@@ -1438,12 +1587,11 @@ const char* mjs_setToVelocity(mjsActuator* actuator, double kv) {
 
 // Set to damper actuator.
 const char* mjs_setToDamper(mjsActuator* actuator, double kv) {
-  mjuu_zerovec(actuator->gainprm, mjNGAIN);
+  SetControl(actuator, mjACTUATOR_DAMPER);
+  actuator->gainprm[0]  = 0;
   actuator->gainprm[2]  = -kv;
   actuator->ctrllimited = mjLIMITED_TRUE;
-  actuator->dyntype     = mjDYN_NONE;
   actuator->gaintype    = mjGAIN_AFFINE;
-  actuator->biastype    = mjBIAS_NONE;
 
   if (kv < 0) { return "damping coefficient cannot be negative"; }
   if (actuator->ctrlrange[0] < 0 || actuator->ctrlrange[1] < 0) {
@@ -1456,12 +1604,13 @@ const char* mjs_setToDamper(mjsActuator* actuator, double kv) {
 // Set to cylinder actuator.
 const char* mjs_setToCylinder(
     mjsActuator* actuator, double timeconst, double bias, double area, double diameter) {
+  SetControl(actuator, mjACTUATOR_CYLINDER);
   actuator->dynprm[0]  = timeconst;
   actuator->biasprm[0] = bias;
   actuator->gainprm[0] = area;
   if (diameter >= 0) { actuator->gainprm[0] = mjPI / 4 * diameter * diameter; }
+  actuator->ctrlspec = mjINPUT_PRESSURE;
   actuator->dyntype  = mjDYN_FILTER;
-  actuator->gaintype = mjGAIN_FIXED;
   actuator->biastype = mjBIAS_AFFINE;
   return "";
 }
@@ -1479,18 +1628,20 @@ const char* mjs_setToMuscle(mjsActuator* actuator,
                             double       vmax,
                             double       fpmax,
                             double       fvmax) {
-  // set muscle defaults if same as global defaults
-  if (actuator->dynprm[0] == 1) actuator->dynprm[0] = 0.01;    // tau act
-  if (actuator->dynprm[1] == 0) actuator->dynprm[1] = 0.04;    // tau deact
-  if (actuator->gainprm[0] == 1) actuator->gainprm[0] = 0.75;  // range[0]
-  if (actuator->gainprm[1] == 0) actuator->gainprm[1] = 1.05;  // range[1]
-  if (actuator->gainprm[2] == 0) actuator->gainprm[2] = -1;    // force
-  if (actuator->gainprm[3] == 0) actuator->gainprm[3] = 200;   // scale
-  if (actuator->gainprm[4] == 0) actuator->gainprm[4] = 0.5;   // lmin
-  if (actuator->gainprm[5] == 0) actuator->gainprm[5] = 1.6;   // lmax
-  if (actuator->gainprm[6] == 0) actuator->gainprm[6] = 1.5;   // vmax
-  if (actuator->gainprm[7] == 0) actuator->gainprm[7] = 1.3;   // fpmax
-  if (actuator->gainprm[8] == 0) actuator->gainprm[8] = 1.2;   // fvmax
+  SetControl(actuator, mjACTUATOR_MUSCLE);
+
+  // muscle defaults
+  actuator->dynprm[0]  = 0.01;  // tau act
+  actuator->dynprm[1]  = 0.04;  // tau deact
+  actuator->gainprm[0] = 0.75;  // range[0]
+  actuator->gainprm[1] = 1.05;  // range[1]
+  actuator->gainprm[2] = -1;    // force
+  actuator->gainprm[3] = 200;   // scale
+  actuator->gainprm[4] = 0.5;   // lmin
+  actuator->gainprm[5] = 1.6;   // lmax
+  actuator->gainprm[6] = 1.5;   // vmax
+  actuator->gainprm[7] = 1.3;   // fpmax
+  actuator->gainprm[8] = 1.2;   // fvmax
 
   if (tausmooth < 0) { return "muscle tausmooth cannot be negative"; }
 
@@ -1519,10 +1670,9 @@ const char* mjs_setToMuscle(mjsActuator* actuator,
 
 // Set to adhesion actuator.
 const char* mjs_setToAdhesion(mjsActuator* actuator, double gain) {
+  SetControl(actuator, mjACTUATOR_ADHESION);
   actuator->gainprm[0]  = gain;
   actuator->ctrllimited = mjLIMITED_TRUE;
-  actuator->gaintype    = mjGAIN_FIXED;
-  actuator->biastype    = mjBIAS_NONE;
 
   if (gain < 0) return "adhesion gain cannot be negative";
   if (actuator->ctrlrange[0] < 0 || actuator->ctrlrange[1] < 0)
@@ -1580,6 +1730,7 @@ const char* mjs_setToDCMotor(mjsActuator* actuator,
   if (R <= 0) return "DC motor: resistance R must be positive";
 
   // set types
+  SetControl(actuator, mjACTUATOR_DCMOTOR);
   actuator->dyntype  = mjDYN_DCMOTOR;
   actuator->gaintype = mjGAIN_DCMOTOR;
   actuator->biastype = mjBIAS_DCMOTOR;

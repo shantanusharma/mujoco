@@ -97,6 +97,7 @@ class mjCModel_ : public mjsElement {
   mjtSize nflexbending;    // number of bending parameters in all flexes
   mjtSize nefm0dof;        // number of dofs covered by the bending factor
   mjtSize nefm0L;          // number of non-zeros in the bending factor
+  mjtSize nefmCvert;       // number of sparse metric factor ordering slots
   mjtSize nflexelemedge;   // number of element edges in all flexes
   mjtSize nflexshelldata;  // number of shell fragment vertex ids in all flexes
   mjtSize nflextexcoord;   // number of vertex texture coordinates in all flexes
@@ -286,10 +287,17 @@ class mjCModel : public mjCModel_, private mjSpec {
     return active_plugins_;
   };
 
-  const std::vector<mjCFlex*>&     Flexes() const { return flexes_; }
-  const std::vector<mjCMesh*>&     Meshes() const { return meshes_; }
-  const std::vector<mjCSkin*>&     Skins() const { return skins_; }
-  const std::vector<mjCHField*>&   HFields() const { return hfields_; }
+  const std::vector<mjCFlex*>&   Flexes() const { return flexes_; }
+  const std::vector<mjCMesh*>&   Meshes() const { return meshes_; }
+  const std::vector<mjCSkin*>&   Skins() const { return skins_; }
+  const std::vector<mjCHField*>& HFields() const { return hfields_; }
+
+  // the meshes and height fields as compiled: those of the spec, then the instances which the
+  // compilation made of those used at several scales
+  std::vector<mjCMesh*>   CompiledMeshes() const;
+  std::vector<mjCHField*> CompiledHFields() const;
+  int NumCompiledMeshes() const { return meshes_.size() + meshinstances_.size(); }
+
   const std::vector<mjCTexture*>&  Textures() const { return textures_; }
   const std::vector<mjCMaterial*>& Materials() const { return materials_; }
   const std::vector<mjCPair*>&     Pairs() const { return pairs_; }
@@ -402,6 +410,9 @@ class mjCModel : public mjCModel_, private mjSpec {
   // clear the compilation signature after a structural change
   void InvalidateSignature() { spec.element->signature = 0; }
 
+  // the model was compiled and its structure changed since
+  bool StructureChanged() const { return compiled && spec.element->signature == 0; }
+
   // increment and decrement reference count
   void AddRef() { ++refcount; }
   int  GetRef() const { return refcount; }
@@ -445,8 +456,20 @@ class mjCModel : public mjCModel_, private mjSpec {
   int  CountNJmom(const mjModel* m);  // compute number of non-zeros in actuator_moment matrix
   int  CountNJten(const mjModel* m);  // compute number of non-zeros in ten_J matrix
 
-  // remove plugins that are not referenced by any object
-  void RemovePlugins();
+  // return the plugin instances that elements or defaults reference by name or point to, including
+  // the elements in the subtree of body, which can be outside the tree
+  std::unordered_set<const mjsElement*> ReferencedPlugins(const mjCBody* body = nullptr);
+
+  // delete the referenced plugin instances that elements and defaults no longer reference
+  void RemovePlugins(const std::unordered_set<const mjsElement*>& referenced);
+
+  // give the geoms and sites which use a mesh or a height field the instance of the asset at the
+  // scale of their use, made again unless the assets are reused
+  void MakeInstances(bool reuse);
+
+  // instances which compilation makes of the meshes and height fields used at several scales
+  std::vector<mjCMesh*>   meshinstances_;
+  std::vector<mjCHField*> hfieldinstances_;
 
   // objects created here
   std::vector<mjCFlex*>     flexes_;      // list of flexes
@@ -553,6 +576,10 @@ class mjCModel : public mjCModel_, private mjSpec {
   // expand a keyframe, filling in missing values
   void ExpandKeyframe(mjCKey* key, const mjtNum* qpos0_, const mjtNum* bpos, const mjtNum* bquat);
 
+  // scale the vectors of a keyframe from the units of the spec to the compiled model, or back
+  template <class T>
+  void ScaleKeyframe(T* qpos, T* qvel, T* act, T* ctrl, T* mpos, bool inverse) const;
+
   // compute qpos0
   void ComputeReference();
 
@@ -562,11 +589,6 @@ class mjCModel : public mjCModel_, private mjSpec {
   // copy to the elements the values of the model which differ from those they hold, and with
   // `tospec` to the spec as well; without `write`, only report those which the spec cannot express
   void BackValues(const mjModel* m, bool tospec, bool write);
-
-  // Mark plugin instances mentioned in the list
-  template <class T>
-  void MarkPluginInstance(std::unordered_map<std::string, bool>& instances,
-                          const std::vector<T*>&                 list);
 
   // print the tree of a body
   void PrintTree(std::stringstream& tree, const mjCBody* body, int depth = 0);
@@ -580,9 +602,6 @@ class mjCModel : public mjCModel_, private mjSpec {
   // resolve references in a list of objects
   template <class T>
   void ResolveReferences(std::vector<T*>& list, mjCBody* body = nullptr);
-
-  // delete all plugins created by the subtree
-  void DeleteSubtreePlugin(mjCBody* subtree);
 
   mjListKeyMap             ids;        // map from object names to ids
   mjNameSet                names_;     // names in use per element type

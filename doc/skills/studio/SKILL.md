@@ -105,6 +105,9 @@ message-driven plugin architecture:
     -   `python/mujoco/experimental/studio/sample/implot.py` —
         Demonstrates real-time responsive charting with Dear ImGui and ImPlot
         via `BodyInspector`.
+    -   `python/mujoco/experimental/studio/sample/custom_sim_loop.py` —
+        Demonstrates a script that owns its stepping and pacing loop via
+        `handle.sync(model, data)`.
 
 ## 3. Messaging & Channel Protocol (`messages.py`)
 
@@ -139,6 +142,32 @@ channels. **Convention:** custom message classes derive from `Snapshot` or
     and for one-shot requests: `ResetEvent`, `SingleStepEvent`,
     `RequestPauseEvent`.
 
+### Send Only What Changed (`send_if_changes`)
+
+Bidirectional snapshots (`MjOptionSnapshot`, `StepControlSnapshot`) are sent
+only by the side that changed the value; if either side sent its full value
+every frame, it would overwrite the other side's edits. Both sides use the same
+helper, `messages.send_if_changes(send_fn, *make_messages, should_send=...)`:
+a context manager that calls each `make_message()` (pass lambdas, so they are
+re-read) on entering and on leaving the `with` block and sends the messages
+that differ.
+
+-   **Viewer**: `viewer.send_if_changes(...)` wraps the blocks in which the UI
+    edits state (`ViewerApp.update()` and `build_gui()`, the Inspector panels).
+    Incoming sim snapshots are applied outside those blocks, so they never echo
+    back.
+-   **Sim**: `ViewerHandle.sync()` wraps the dispatch of `PreStepEvent`,
+    `StepEvent` and `PostStepEvent` for `model.opt`, and a plugin that owns
+    state the viewer mirrors wraps its own edits in `handle.send_if_changes`
+    (`StepControl` does so around `advance()` and `RequestPauseEvent`).
+    Incoming viewer snapshots are applied outside those blocks, so they never
+    echo back either.
+
+The pattern only sees edits made inside a wrapped block. So edit `model.opt`
+from a step-event handler, never from the launcher loop between `sync()` calls,
+and change another plugin's state by dispatching an event it handles (e.g.
+`RequestPauseEvent` for `StepControl`) rather than by reaching into it.
+
 ### Lifecycle Events
 
 Lifecycle events are standard framework events dispatched by the runner loops to
@@ -160,13 +189,16 @@ shutdown:
         viewer-plugin state on model changes so `viewer.model` and `viewer.data`
         are already up to date.
     4.  `UpdateEvent` — dispatched every frame (after incoming sim events and
-        snapshots are applied) to update visuals, camera, perturbations, and
-        transient geoms.
+        snapshots are applied) to update visuals, camera, perturbations,
+        transient geoms, and prepare data or upload textures for the GUI.
     5.  `BuildGuiEvent` — dispatched every frame immediately after `UpdateEvent`
-        to construct and lay out Dear ImGui / ImPlot widgets.
+        to construct and lay out Dear ImGui / ImPlot widgets (keep handlers
+        focused on ImGui/ImPlot calls; prepare GUI data in `UpdateEvent`).
     6.  `ExitEvent` — dispatched once when the viewer shuts down, whether the
-        exit came from the sim side or from the window being closed. Handle it
-        to release resources (threads, pools, GPU handles).
+        exit came from the sim side, from the window being closed, or from a
+        viewer plugin handler raising (the exception is then re-raised on the
+        sim side by `ViewerHandle.close()`). Handle it to release resources
+        (threads, pools, GPU handles).
 -   **Simulation Lifecycle Events** (dispatched on the sim side to
     `sim_plugins`):
     1.  `SimInitEvent` (`viewer_handle.SimInitEvent`) — dispatched once by
@@ -258,8 +290,9 @@ There is an intentional distinction between **lifecycle phase events** (`Pre*` /
         physics stepper), or `PostStepEvent` (to observe or record the stepped
         state).
     -   **Before / during GUI construction**: Subscribe to `UpdateEvent` for
-        per-frame state updates and `BuildGuiEvent` for Dear ImGui widget
-        submission.
+        per-frame state updates, GUI data preparation, and texture uploads
+        (e.g. `viewer.upload_image`), and `BuildGuiEvent` solely for Dear ImGui
+        / ImPlot widget submission.
 -   **When to use `messages.Priority`**: Reserve `priority=...` strictly for
     cases where multiple handlers target the **exact same event and phase** and
     one handler needs to override or consume (`return True`) the event before a
@@ -348,8 +381,14 @@ with launch_web.launch(
     sim_plugins=[step_control.StepControl(), sim_history.SimHistory()],
 ) as handle:
   while handle.is_running():
+    # Do NOT edit model, data or plugin state here; do it in step-event
+    # handlers, or sync() cannot send the change to the viewer (see §8.2).
     model, data = handle.sync(model, data)
 ```
+
+To step and pace physics directly in the loop instead, omit `StepControl()` and
+step after `handle.sync(model, data)` (see
+`python/mujoco/experimental/studio/sample/custom_sim_loop.py`).
 
 ## 5. Authoring Python Plugins
 
@@ -562,6 +601,16 @@ C++):
 -   **No Display Forwarding**: No need for X11 forwarding, VNC, or remote
     desktop setups.
 
+> [!WARNING]
+>
+> **Trust Model (Local & Trusted Networks Only):**
+> `WebViewer` has no authentication or encryption (plain HTTP and WebSockets)
+> and listens on all network interfaces, so anyone who can reach its port can
+> connect. Connected browsers can see host-side information such as model file
+> paths, exception messages, and logs. Use it locally, on trusted networks, or
+> through an authenticated tunnel, and do not expose the port to untrusted
+> networks. The startup banner repeats this as a short warning.
+
 ## 8. Common Gotchas & Best Practices
 
 ### 1. Explicit Message Passing & Thread Boundaries (Python)
@@ -606,6 +655,16 @@ stepping, perturbation forces, sensor logging, or RL resets):
     subscribing to `StepEvent` or custom messages.
 -   **Event Dispatch**: Dispatch an `Event` to the simulation thread rather than
     mutating state directly in the outer loop.
+-   **Edit `model` and `data` only from step-event handlers**: `sync()` sends
+    `model.opt` when it changed across its `PreStepEvent` / `StepEvent` /
+    `PostStepEvent` dispatch (see
+    [Send Only What Changed](#send-only-what-changed-send_if_changes)), so an
+    `opt` edit made in this loop is never sent and the viewer's next snapshot
+    overwrites it; other model fields are not synced at all, so publish the
+    model again with `handle.set_model()` after editing them. `data` is sent
+    after every step, but `sync()` applies the viewer's resets, slider edits
+    and perturbations before `PreStepEvent`, so controls or forces written in
+    this loop can be overwritten in the same `sync()`.
 -   **Always Reassign `model, data = handle.sync(model, data)`**: Unlike legacy
     `mujoco.viewer.Handle.sync()` (which took no arguments and returned `None`),
     Studio's `ViewerHandle.sync(model, data)` expects the current model/data and
@@ -729,3 +788,26 @@ client maintain continuous heartbeat ping-pongs over `/ui` and `/state`.
 
 Always build and run Studio targets with `-c opt` so physics stepping, Filament
 rendering, and UI streaming execute with compiler optimizations enabled.
+
+### 9. Debugging: Terminal, Studio Console & Browser Console
+
+Host and browser logs end up in different places:
+
+1.  **Host logs (Python and the MuJoCo engine)**: Once a `ViewerApp` exists
+    (and in the C++ Studio app), MuJoCo log messages (`mju_warning`,
+    `mju_message`, ...) and Python `logging` records, `warnings.warn` calls,
+    and uncaught exceptions from any thread are added to the Studio Console
+    (`ux.console_gui` / `Console::WindowGui`). Each hook still passes messages
+    to the existing handlers (falling back to `logging.lastResort` when no other
+    Python handler is configured), so errors and warnings still appear in the
+    terminal. The status bar shows the message, warning, and error counts;
+    click it to toggle the Console. Right-click the Console to clear it, copy
+    all lines, or change the engine's log config (`mju_setLogConfig`): whether
+    it prints to the terminal, writes `MUJOCO_LOG.TXT`, and which info topics
+    are on; the Console itself captures regardless. Tests and scripts can read
+    the Console with `ux.get_console_lines()` and `ux.get_console_counts()`.
+2.  **Browser logs (WebViewer rendering, WASM, or WebSocket issues)**: These are
+    only in the browser console. Read them with the `chrome-devtools` MCP
+    (`list_console_messages`) if available, or run headless Chrome with
+    `--remote-debugging-port=9222` and subscribe to the DevTools Protocol's
+    `Runtime.consoleAPICalled` and `Runtime.exceptionThrown` events.

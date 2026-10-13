@@ -132,6 +132,9 @@
     XVEC( double,         pos,        3 ) \
     XVEC( double,         quat,       4 ) \
     X   ( mjsOrientation, alt,        1 ) \
+    XVEC( double,         scale,      3 ) \
+    X   ( mjtScaling,     scaling,    1 ) \
+    X   ( double,         massscale,  1 ) \
     X   ( mjString*,      info,       1 )
 
 
@@ -333,6 +336,8 @@
     X   ( mjIntVec*,       userface,         1 ) \
     X   ( mjIntVec*,       userfacenormal,   1 ) \
     X   ( mjIntVec*,       userfacetexcoord, 1 ) \
+    X   ( mjDoubleVec*,    usernode,         1 ) \
+    X   ( mjIntVec*,       usertet,          1 ) \
     X   ( mjsPlugin,       plugin,           1 ) \
     X   ( mjString*,       material,         1 ) \
     X   ( int,             octree_maxdepth,  1 ) \
@@ -494,6 +499,7 @@
 
 #define MJSACTUATOR_FIELDS                          \
     X   ( mjsElement*,   element,       1         ) \
+    X   ( mjtActuator,   type,          1         ) \
     X   ( mjtGain,       gaintype,      1         ) \
     XVEC( double,        gainprm,       mjNGAIN   ) \
     X   ( mjtBias,       biastype,      1         ) \

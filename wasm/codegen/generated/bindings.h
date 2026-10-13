@@ -3685,6 +3685,21 @@ struct MjsFrame {
   emscripten::val quat() const {
     return emscripten::val(emscripten::typed_memory_view(4, ptr_->quat));
   }
+  emscripten::val scale() const {
+    return emscripten::val(emscripten::typed_memory_view(3, ptr_->scale));
+  }
+  mjtScaling scaling() const {
+    return ptr_->scaling;
+  }
+  void set_scaling(mjtScaling value) {
+    ptr_->scaling = value;
+  }
+  double massscale() const {
+    return ptr_->massscale;
+  }
+  void set_massscale(double value) {
+    ptr_->massscale = value;
+  }
   mjString info() const {
     return (ptr_ && ptr_->info) ? *(ptr_->info) : "";
   }
@@ -3961,6 +3976,12 @@ struct MjModel {
   }
   void set_nefm0L(int value) {
     ptr_->nefm0L = static_cast<mjtSize>(value);
+  }
+  int nefmCvert() const {
+    return static_cast<int>(ptr_->nefmCvert);
+  }
+  void set_nefmCvert(int value) {
+    ptr_->nefmCvert = static_cast<mjtSize>(value);
   }
   int nflexelemedge() const {
     return static_cast<int>(ptr_->nflexelemedge);
@@ -5024,6 +5045,9 @@ struct MjModel {
   emscripten::val efm0_L() const {
     return emscripten::val(emscripten::typed_memory_view(ptr_->nefm0L, ptr_->efm0_L));
   }
+  emscripten::val efmC_perm() const {
+    return emscripten::val(emscripten::typed_memory_view(ptr_->nefmCvert, ptr_->efmC_perm));
+  }
   emscripten::val flex_damping() const {
     return emscripten::val(emscripten::typed_memory_view(ptr_->nflex, ptr_->flex_damping));
   }
@@ -6021,6 +6045,12 @@ struct MjsActuator {
   explicit MjsActuator(mjsActuator *ptr);
   mjsActuator* get() const;
   void set(mjsActuator* ptr);
+  mjtActuator type() const {
+    return ptr_->type;
+  }
+  void set_type(mjtActuator value) {
+    ptr_->type = value;
+  }
   mjtGain gaintype() const {
     return ptr_->gaintype;
   }
@@ -6533,6 +6563,12 @@ struct MjsMesh {
   }
   mjIntVec &userfacetexcoord() const {
     return *(ptr_->userfacetexcoord);
+  }
+  mjDoubleVec &usernode() const {
+    return *(ptr_->usernode);
+  }
+  mjIntVec &usertet() const {
+    return *(ptr_->usertet);
   }
   mjString material() const {
     return (ptr_ && ptr_->material) ? *(ptr_->material) : "";

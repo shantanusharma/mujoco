@@ -126,7 +126,8 @@ the required size. See :ref:`mj_saveXML` for what is saved.
 Save spec to XML file, return 0 on success, -1 otherwise. The compiler attributes
 :ref:`savecompiled<compiler-savecompiled>` and :ref:`savecanonical<compiler-savecanonical>` of the spec say whether
 the model is saved as it was compiled or as it is written in the spec, and in which notation; see
-:ref:`Model Encoding & Saving <meSaving>`. Saving the compiled values requires that the spec first be compiled.
+:ref:`Model Encoding & Saving <meSaving>`. Saving the compiled values requires that the spec first be compiled, and
+compiled again after it is structurally edited (elements added, deleted or attached).
 
 .. _mj_encode:
 
@@ -998,7 +999,8 @@ All outputs are optional.
 .. _mjs_delete:
 
 Remove object corresponding to the given element; return 0 on success. Deleting a body or a frame also deletes
-everything inside it, along with all the elements that reference a deleted element.
+everything inside it, along with all the elements that reference a deleted element. A
+:ref:`plugin instance<plugin-instance>` is deleted along with the last element that references it.
 
 .. _mjs_fuseStatic:
 
@@ -1029,6 +1031,34 @@ is not inferred. It is an error when :ref:`inertiafromgeom<compiler-inertiafromg
 inertia of every body whatever its inertial. Assets are read as in :ref:`mj_compile`. Returns 0 on success.
 
 To read an inferred inertial without adopting it, compile and look it up in :ref:`mjModel` with :ref:`mjs_getId`.
+
+.. _mjs_makeFlex:
+
+Create a :ref:`flexcomp<body-flexcomp>` in ``body`` and return the resulting flex; the arguments correspond to the
+flexcomp attributes. If ``file`` is the name of an existing :ref:`mesh asset<asset-mesh>`, the flexcomp uses that mesh as
+with the :ref:`mesh<body-flexcomp-mesh>` attribute, otherwise ``file`` is the name of a mesh file. The flexcomp is
+expanded immediately, so later changes to the mesh asset do not affect the created flex.
+
+.. _mjs_makeMesh:
+
+Generate a built-in procedural mesh of type :ref:`mjtMeshBuiltin` with the given parameters. Returns 0 on success; on
+failure, returns a nonzero value and sets the error of the spec. The parameters of the sphere, hemisphere, cone,
+supersphere, supertorus, wedge and plate types are those of the corresponding :ref:`mesh/builtin<asset-mesh-builtin>`
+attribute. The procedural types below generate the same shapes as the corresponding :ref:`flexcomp<body-flexcomp>`
+types; their nodes are stored in double precision in ``usernode``.
+
+- ``mjMESH_BUILTIN_GRID`` (count[3], spacing[3], [dim]): A regular grid with ``count[i] > 0`` points along each axis,
+  separated by ``spacing[i]``. ``dim`` (default 3) creates tetrahedra (3) or triangles (2);
+  ``count`` must be 1 along the axes beyond ``dim``.
+- ``mjMESH_BUILTIN_BOX``, ``mjMESH_BUILTIN_CYLINDER``, ``mjMESH_BUILTIN_ELLIPSOID`` (count[3], spacing[3], [dim]): The
+  surface of a box grid with ``count[i] >= 2`` points along each axis, projected onto the shape. ``dim`` (default 3)
+  creates tetrahedra connecting the surface to the center (3) or surface triangles (2).
+- ``mjMESH_BUILTIN_SQUARE``, ``mjMESH_BUILTIN_DISC`` (count[3], spacing[3]): A triangulated square, or a disc obtained by
+  radial projection of the square; ``count[2]`` must be 1.
+
+Types without volume (square, disc, and
+grid, box, cylinder and ellipsoid with ``dim`` < 3) change a ``legacy`` :ref:`inertia<asset-mesh-inertia>` to
+``shell``.
 
 .. _Resources:
 

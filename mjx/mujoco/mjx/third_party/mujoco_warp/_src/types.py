@@ -1470,7 +1470,6 @@ class Model:
                       geom distance sensors
     nsensortaxel: number of taxels in all tactile sensors
     ntactileweld: number of unique weld bodies with tactile sensors
-    nsensorcontact: number of contact sensors
     nrangefinder: number of rangefinder sensors
     nmaxcondim: maximum condim across geoms, pairs, and flexes
     nmaxpyramid: maximum number of pyramid directions
@@ -1563,8 +1562,8 @@ class Model:
     sensor_e_kinetic: evaluate energy_vel
     sensor_tendonactfrc_adr: address for tendonactfrc sensor
     sensor_subtree_vel: evaluate subtree_vel
-    sensor_contact_adr: addresses for contact sensors        (nsensorcontact,)
-    sensor_adr_to_contact_adr: map sensor adr to contact adr (nsensor,)
+    sensor_contact_pos_adr: addresses for position contact sensors (nsensor_contact_pos,)
+    sensor_contact_acc_adr: addresses for acceleration contact sensors (nsensor_contact_acc,)
     sensor_rne_postconstraint: evaluate rne_postconstraint
     sensor_rangefinder_bodyid: bodyid for rangefinder        (nrangefinder,)
     weld_tactile_id: weld body to tactile weld index         (nbody,)
@@ -1578,9 +1577,6 @@ class Model:
     M_fullm_j: sparse mass matrix addressing
     M_elemid: (row, col) -> CSR madr addresses; -1 if not a chain ancestor
     M_hinit_i: row index of each CSR M entry; for densifying M into the dense Newton H (nC,)
-    M_fullm_upper_i: upper-triangle row indices for solver h seeding
-    M_fullm_upper_j: upper-triangle column indices for solver h seeding
-    M_fullm_upper_elemid: source elemid into M_fullm_i/M_fullm_j
     qD_fullm_i: D-structure row indices for RNE derivatives
     qD_fullm_j: D-structure column indices for RNE derivatives
     M_mulm_rowadr: sparse matmul row pointers
@@ -2003,7 +1999,6 @@ class Model:
   nsensorcollision: int
   nsensortaxel: int
   ntactileweld: int
-  nsensorcontact: int
   nrangefinder: int
   nmaxcondim: int
   nmaxpyramid: int
@@ -2086,8 +2081,8 @@ class Model:
   sensor_e_kinetic: bool
   sensor_tendonactfrc_adr: array("nsensor_tendonactfrc", int)
   sensor_subtree_vel: bool
-  sensor_contact_adr: array("nsensorcontact", int)
-  sensor_adr_to_contact_adr: array("nsensor", int)
+  sensor_contact_pos_adr: array("nsensor_contact_pos", int)
+  sensor_contact_acc_adr: array("nsensor_contact_acc", int)
   sensor_rne_postconstraint: bool
   sensor_rangefinder_bodyid: array("nrangefinder", int)
   weld_tactile_id: array("nbody", int)
@@ -2103,9 +2098,6 @@ class Model:
   M_fullm_j: array("nM_fullm", int)
   M_elemid: array("nv", "nv", int)  # (row, col) -> CSR madr address; -1 if col is not a chain ancestor of row
   M_hinit_i: array("nC", int)  # row index of each CSR M entry (for densifying M into the dense Newton H)
-  M_fullm_upper_i: array("nM_fullm_upper", int)
-  M_fullm_upper_j: array("nM_fullm_upper", int)
-  M_fullm_upper_elemid: array("nM_fullm_upper", int)
   qD_fullm_i: array("nqD_fullm", int)  # D-structure (full square) row indices for RNE derivatives
   qD_fullm_j: array("nqD_fullm", int)  # D-structure (full square) column indices for RNE derivatives
   # Gather-based sparse mul_m indices (thread per DOF, no atomics)
