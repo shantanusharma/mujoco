@@ -5,7 +5,8 @@ description: >-
   sim/viewer threads, message passing (Snapshot latest-wins vs Event FIFO queue),
   lifecycle events, @messages.handler priorities, blocking viewer runners and
   non-blocking viewer launchers, Python/C++ plugin registry (mjPLUGIN_LIB_INIT),
-  NetImgui/WASM WebViewer streaming.
+  NetImgui/WASM WebViewer streaming,
+  Python plugin hot reload (--hot_reload, HotReloadEvent).
   Use for launching Studio viewers, authoring Studio plugins, simulation-viewer messaging.
   Do NOT use for ImGui widget layout (mujoco-gui) or physics simulation (mujoco-python).
 ---
@@ -67,8 +68,8 @@ message-driven plugin architecture:
 │              Simulation Thread (Caller)                │
 │  - Owns MjModel and MjData                             │
 │  - Runs physics loop, RL policies, or MPC planners     │
-│  - Executes sim_plugins (e.g. StepControl, reset)      │
-│  - Drives simulation via handle.sync(model, data)      │
+│  - Executes SimPlugin instances (e.g. StepControl)     │
+│  - Drives simulation via handle.sync()                 │
 └────────────────────────────────────────────────────────┘
                         ▲
                         │   Queued Events & Snapshots
@@ -78,7 +79,7 @@ message-driven plugin architecture:
 │              Viewer Thread (or Web Client)             │
 │  - Owns Window, Renderer, Camera, VisOptions, Perturb  │
 │  - Owns local copy of MjModel and MjData for rendering │
-│  - Executes viewer_plugins (ViewerApp, custom UI)      │
+│  - Executes ViewerPlugin instances (ViewerApp, UI)     │
 │  - Dispatches lifecycle events (UpdateEvent, BuildGuiEvent) │
 └────────────────────────────────────────────────────────┘
 ```
@@ -87,24 +88,34 @@ message-driven plugin architecture:
     and the viewer thread run independently. The simulation communicates with
     the viewer non-blockingly through endpoints (`SimEndpoint ↔ ViewerEndpoint`)
     using queued `Event`s and latest-value `Snapshot`s.
--   **Priority-based Plugin System (`plugin_registry.py`)**: State and UI
-    behaviors are decoupled into standalone plugin classes decorated with
-    `@messages.handler(priority=...)`.
-    -   **Simulation plugins (`sim_plugins`)**: Handle simulation-side events
-        (e.g. physics reset, step control, perturbations, model reloading,
-        policy changes).
-    -   **Viewer plugins (`viewer_plugins`)**: Handle rendering and UI lifecycle
-        events (e.g. viewer initialization, model reloading, per-frame visual
-        updates, GUI construction).
+-   **Priority-based Plugin System (`plugin.py`, `plugin_registry.py`)**: State
+    and UI behaviors are decoupled into standalone plugin classes decorated with
+    `@messages.handler(priority=...)`; `plugin_registry.PluginRegistry` discovers
+    the handlers and dispatches messages to them. Launchers accept a single
+    `plugins=[...]` argument and partition instances by base class:
+    -   **Simulation plugins (`plugin.SimPlugin`)**:
+        Subclass `SimPlugin` to run on the simulation thread, automatically
+        caching `self.handle` on `SimInitEvent`, and handle simulation-side
+        events (e.g. physics reset, step control, perturbations, model
+        reloading, policy changes).
+    -   **Viewer plugins (`plugin.ViewerPlugin`)**:
+        Subclass `ViewerPlugin` to run on the viewer thread, automatically
+        caching `self.viewer` on `ViewerInitEvent`, and handle rendering and UI
+        lifecycle events (e.g. viewer initialization, model reloading,
+        per-frame visual updates, GUI construction).
 -   **Standard Samples (`python/mujoco/experimental/studio/`)**:
     -   `python/mujoco/experimental/studio/viewer.py` —
-        Minimal baseline with standard GUI (`viewer_app.ViewerApp`).
+        Standard Studio viewer (`viewer_app.ViewerApp`); supports
+        `--model=<file>` and `--plugins=a.py,b.py` (instantiates every
+        `ViewerPlugin`/`SimPlugin` defined in those files).
     -   `python/mujoco/experimental/studio/sample/ghost.py` —
         Demonstrates a viewer plugin (`GhostRenderer`) injecting extra geoms via
-        `extra_geoms` and custom Dear ImGui controls on `BuildGuiEvent`.
+        `extra_geoms` and custom Dear ImGui controls on `BuildGuiEvent`; run
+        with `viewer.py --model=... --plugins=sample/ghost.py`.
     -   `python/mujoco/experimental/studio/sample/implot.py` —
         Demonstrates real-time responsive charting with Dear ImGui and ImPlot
-        via `BodyInspector`.
+        via `BodyInspector`; run with
+        `viewer.py --model=... --plugins=sample/implot.py`.
     -   `python/mujoco/experimental/studio/sample/custom_sim_loop.py` —
         Demonstrates a script that owns its stepping and pacing loop via
         `handle.sync(model, data)`.
@@ -176,18 +187,21 @@ below is ordered chronologically from startup through per-iteration execution to
 shutdown:
 
 -   **Viewer Lifecycle Events** (dispatched on the viewer side by
-    `run_viewer_loop` to `viewer_plugins`):
-    1.  `ViewerInitEvent` (`viewer_protocol.ViewerInitEvent`) — dispatched once
-        on viewer initialization so stateful plugins can cache the viewer
-        instance (`event.viewer`).
-    2.  `ModelEvent` — received when a model is initially loaded or hot-swapped;
-        `Viewer` deep-copies `viewer.model`, creates `viewer.data`, and runs
-        `mj_forward`.
+    `run_viewer_loop` to `ViewerPlugin` instances):
+    1.  `ViewerInitEvent` (`viewer_protocol.ViewerInitEvent`, also exported as
+        `plugin.ViewerInitEvent`) — dispatched once on viewer initialization
+        (`ViewerPlugin` caches `self.viewer` automatically above `CRITICAL`
+        priority before subclass handlers run).
+    2.  `ModelEvent` — received when a model is published by the sim; `Viewer`
+        deep-copies `viewer.model`, creates `viewer.data`, records
+        `viewer.model_path` (`event.path`), and runs `mj_forward`.
     3.  `PostModelEvent` — dispatched locally by `Viewer` immediately after
-        `ModelEvent` has initialized `viewer.model` and `viewer.data`. Subscribe
-        to `PostModelEvent` (rather than `ModelEvent`) when resetting
-        viewer-plugin state on model changes so `viewer.model` and `viewer.data`
-        are already up to date.
+        `ModelEvent` has initialized `viewer.model` and `viewer.data`. Carries
+        `(model, data, path)`: reloading the same `path` preserves viewer UI
+        state (camera, pause, and playback speed in `ViewerApp`), while a
+        different `path` (or empty) resets it. Subscribe to `PostModelEvent`
+        (rather than `ModelEvent`) when resetting viewer-plugin state on model
+        changes so `viewer.model` and `viewer.data` are already up to date.
     4.  `UpdateEvent` — dispatched every frame (after incoming sim events and
         snapshots are applied) to update visuals, camera, perturbations,
         transient geoms, and prepare data or upload textures for the GUI.
@@ -200,31 +214,41 @@ shutdown:
         sim side by `ViewerHandle.close()`). Handle it to release resources
         (threads, pools, GPU handles).
 -   **Simulation Lifecycle Events** (dispatched on the sim side to
-    `sim_plugins`):
-    1.  `SimInitEvent` (`viewer_handle.SimInitEvent`) — dispatched once by
-        `ViewerHandle.__init__` so stateful plugins can cache the handle
-        (`event.handle`) instead of the launcher having to hand it to them.
-    2.  `ModelEvent` — dispatched when the initial model is set in
-        `ViewerHandle.__init__` or when a model is hot-swapped via
-        `handle.set_model()` (or received from the viewer); `ViewerHandle`
-        installs `handle.model` and `handle.data`, runs `mj_forward`, and
-        forwards the model to the viewer.
-    3.  `PostModelEvent` — dispatched locally by `ViewerHandle` immediately
+    `SimPlugin` instances):
+    1.  `SimInitEvent` (`viewer_handle.SimInitEvent`, also exported as
+        `plugin.SimInitEvent`) — dispatched once by `ViewerHandle.__init__`
+        (`SimPlugin` caches `self.handle` automatically above `CRITICAL`
+        priority before subclass handlers run).
+    2.  `LoadModelEvent` — sent from the viewer (on **Reload** or file
+        drag-and-drop) or dispatched on the sim thread (e.g. by
+        `run(config, model_path=...)`). `ViewerHandle` loads `event.path` (or
+        reloads `handle.model_path` when `event.path` is empty) via
+        `parser.load` and publishes the compiled model with
+        `handle.set_model(model, path=path)`. If loading fails, the error is
+        logged and the previous model stays active.
+    3.  `ModelEvent` — dispatched when a model is published via
+        `handle.set_model()` (or when `handle.sync(model, data)` sees a new
+        model object); `ViewerHandle` sets `handle.model`, `handle.data`, and
+        `handle.model_path`, runs `mj_forward`, and forwards the model to the
+        viewer.
+    4.  `PostModelEvent` — dispatched locally by `ViewerHandle` immediately
         after `ModelEvent` has installed `handle.model` and `handle.data` and
-        run `mj_forward`. Subscribe to `PostModelEvent` (rather than
-        `ModelEvent`) when resetting sim-plugin state on model changes.
-    4.  `PreStepEvent` — dispatched by `ViewerHandle.sync` on every call (after
+        run `mj_forward`. Carries `(model, data, path)`: reloading the same
+        `path` preserves `StepControl` pause, speed, and noise settings.
+        Subscribe to `PostModelEvent` (rather than `ModelEvent`) when resetting
+        sim-plugin state on model changes.
+    5.  `PreStepEvent` — dispatched by `ViewerHandle.sync` on every call (after
         incoming viewer events and snapshots are applied) so plugins can prepare
         the simulation before physics advances (e.g. writing actuator controls,
         applying forces, or hot-swapping models via `handle.set_model`).
-    5.  `StepEvent` — dispatched by `ViewerHandle.sync` immediately after
+    6.  `StepEvent` — dispatched by `ViewerHandle.sync` immediately after
         `PreStepEvent` so sim-side stepping plugins (such as `StepControl`) can
         advance the physics.
-    6.  `PostStepEvent` — dispatched by `ViewerHandle.sync` immediately after
+    7.  `PostStepEvent` — dispatched by `ViewerHandle.sync` immediately after
         `StepEvent` (before `StateSnapshot` is broadcast) so observer/recorder
         plugins (such as `SimHistory`) can inspect or record the resulting
         simulation state.
-    7.  `ExitEvent` — dispatched once by `ViewerHandle.close()`, which the
+    8.  `ExitEvent` — dispatched once by `ViewerHandle.close()`, which the
         `with` block calls on every exit path (normal exit, `KeyboardInterrupt`,
         an exception, or the viewer dying). Handle it to release resources.
 
@@ -240,15 +264,18 @@ shutdown:
 
 ### The `@messages.handler` Decorator
 
-Plugins subscribe to messages by annotating methods with `@messages.handler`:
+Plugins subclass `ViewerPlugin` (`plugin.ViewerPlugin`) or `SimPlugin`
+(`plugin.SimPlugin`) and subscribe to messages by annotating methods with
+`@messages.handler`:
 
 ```python
 from mujoco.experimental.studio import messages
+from mujoco.experimental.studio import plugin
 
-class MyPlugin:
+class MyPlugin(plugin.ViewerPlugin):
   @messages.handler
   def on_build_gui(self, event: messages.BuildGuiEvent) -> bool | None:
-    # Build Dear ImGui elements here
+    # Build Dear ImGui elements here (self.viewer is populated automatically)
     return False  # Return True to consume and halt lower-priority handlers
 ```
 
@@ -338,12 +365,18 @@ For a full reference implementation, see
 
 ### Standard Blocking Runners
 
-All three modules share the same `.run(...)` interface:
+All three modules share the same `.run(...)` interface, accepting either
+`model_path=...` (loaded on the sim thread via `LoadModelEvent`, which sets
+All three modules share the same `.run(...)` interface, accepting either
+`model_path=...` (loaded on the sim thread by `ViewerHandle` via
+`LoadModelEvent`, which sets `handle.model_path` so **Reload** works) or an
+in-memory `model=...` (with optional `data=...`, published via
+`handle.set_model`). `viewer_app.SIM_PLUGINS` bundles the default sim-side
+plugins that back `ViewerApp` (`step_control.StepControl()` and
+`sim_history.SimHistory()`):
 
 ```python
 from mujoco.experimental.studio import launch_web  # Or launch_native / launch_passive
-from mujoco.experimental.studio import sim_history
-from mujoco.experimental.studio import step_control
 from mujoco.experimental.studio import viewer_app
 from mujoco.experimental.studio import viewer_protocol
 
@@ -351,21 +384,23 @@ config = viewer_protocol.ViewerConfig(title='Studio')
 
 launch_web.run(
     config,
-    model=model,
-    data=data,
-    viewer_plugins=[viewer_app.ViewerApp()],
-    sim_plugins=[step_control.StepControl(), sim_history.SimHistory()],
+    model_path=model_path,  # Or model=model, data=data for an in-memory model.
+    plugins=[
+        viewer_app.ViewerApp(),
+        *viewer_app.SIM_PLUGINS,
+    ],
 )
 ```
 
 > [!WARNING]
 >
-> **Stepping and pacing are plugin responsibilities.** Including
-> `step_control.StepControl()` in `sim_plugins` provides standard
-> real-time-paced CPU stepping. If you omit `StepControl()` (for example, when
-> running GPU rollouts or custom RL loops), `handle.sync()` will **not advance
-> physics or sleep**, so your stepping plugin must manage its own pacing to
-> avoid busy-spinning.
+> **Stepping and pacing are plugin responsibilities.** `viewer_app.SIM_PLUGINS`
+> includes `step_control.StepControl()` (real-time-paced CPU stepping) and
+> `sim_history.SimHistory()` (history scrubbing). Pass individual plugins
+> instead when replacing `StepControl()` (for example, when running GPU rollouts
+> or custom RL loops): without a `StepEvent` plugin, `handle.sync()` will **not
+> advance physics or sleep**, so your stepping plugin must manage its own pacing
+> to avoid busy-spinning.
 
 ### Advanced: Non-Blocking Launchers (`launch_web.launch`, `launch_native.launch`, `launch_passive.launch`)
 
@@ -377,8 +412,10 @@ context manager returning a `ViewerHandle`:
 ```python
 with launch_web.launch(
     config,
-    viewer_plugins=[viewer_app.ViewerApp()],
-    sim_plugins=[step_control.StepControl(), sim_history.SimHistory()],
+    plugins=[
+        viewer_app.ViewerApp(),
+        *viewer_app.SIM_PLUGINS,
+    ],
 ) as handle:
   while handle.is_running():
     # Do NOT edit model, data or plugin state here; do it in step-event
@@ -438,8 +475,42 @@ for actively maintained reference implementations.
 >     target locations.
 > 2.  **`AssetBrowserSim` (sim plugin)**: Receives `AssetDropEvent` on the
 >     simulation side (which owns the `MjSpec`), performs spec attachment,
->     recompiles the model, and broadcasts `ModelEvent(model=new_model)` back to
->     the viewer.
+>     recompiles the model, and publishes it via
+>     `handle.set_model(new_model, path=handle.model_path)` (passing
+>     `path=handle.model_path` preserves camera and pause state across in-place
+>     scene edits).
+
+### Hot Reload (Python only, opt-in)
+
+With hot reload enabled (`viewer.py --hot_reload=all`, or
+`viewer_protocol.ViewerConfig(hot_reload='all')`; off by default), saving a
+plugin's `.py` file or the watched model file updates the running viewer on the
+next frame or step without restarting, keeping the browser connection, camera,
+UI layout, and plugin state. The value says what to reload: `all` (plugin
+modules and the model file), `plugins`, `model`, or comma-separated plugin
+class names such as `Scene,SceneGui` (combinable, e.g. `model,Scene`); see
+`hot_reload.Options.parse`.
+
+See the module docstring of
+`python/mujoco/experimental/studio/hot_reload.py` for the full design and usage
+guide, including:
+
+-   **Reloadable vs. fixed boundary:** registered plugin modules (user and
+    built-in plugins such as `ViewerApp`, `StepControl`, and `SimHistory`),
+    same-directory helper modules, and the active XML/URDF model file (with its
+    `<include>`s and assets) reload on save; framework modules, `__main__`, the
+    C++ binary, and the set of registered plugin instances are fixed. Register
+    the viewer/sim plugins you expect to grow up front, and compose separate
+    plugins rather than subclassing built-in plugins.
+-   **Preserving and reconciling state (`HotReloadEvent`):** declare default
+    attribute values on the class (e.g. `height: int = 5`) so mutated attributes
+    on `self` survive class swaps while newly added class attributes appear
+    without re-running `__init__`, and handle `messages.HotReloadEvent` (`if
+    self in event.plugins:`) to initialize new mutable buffers, invalidate
+    cached IDs, migrate reshaped state, or trigger immediate rebuilds.
+-   **Error recovery:** syntax/import/model errors keep the previous code and
+    model and retry on the next save; exceptions raised by a swapped plugin's
+    handlers are caught and logged once per handler until the next reload.
 
 ## 6. C++ Studio & Plugin Architecture
 
@@ -560,7 +631,7 @@ C++):
 ```text
 ┌────────────────────────────────────────────────────────┐
 │              Simulation Thread (Host)                  │
-│  - Runs physics loop & sim_plugins                     │
+│  - Runs physics loop & SimPlugin instances             │
 │  - Pushes state snapshots & receives events            │
 └────────────────────────────────────────────────────────┘
                          ▲ Endpoints (IPC / Queues)
@@ -568,7 +639,7 @@ C++):
                          ▼
 ┌────────────────────────────────────────────────────────┐
 │              WebViewer Thread (Host Server)            │
-│  - Runs viewer_plugins in headless Dear ImGui context  │
+│  - Runs ViewerPlugin instances in headless Dear ImGui  │
 │  - Serves single HTTP port (default 8080)              │
 │  - Streams UI via NetImgui (/ui) & state (/state)      │
 └────────────────────────────────────────────────────────┘
@@ -633,58 +704,49 @@ As a direct consequence of this principle:
 >
 > **Keep `ViewerHandle` minimal.** It is the framework's sim-side orchestrator
 > and should only own `sync()`, message dispatch, and model/data lifecycle.
-> Domain-specific sim-side behaviours belong in **`sim_plugins`** — for
+> Domain-specific sim-side behaviours belong in **`SimPlugin` subclasses** — for
 > example `StepControl` (stepping/pacing) and `SimHistory` (history,
 > scrubbing). Do not add `ux` or `sim` imports to `viewer_handle.py`.
 
 ### 2. Preserve Simulation Loop Boilerplate (Use Plugins & Events)
 
-The outer simulation runner loop:
+The standard simulation runner loop (`viewer_handle.run_sim_loop(handle)`):
 
 ```python
 while handle.is_running():
-  model, data = handle.sync(model, data)
+  handle.sync()
 ```
 
-is standardized boilerplate intended to remain identical across all Studio
-launchers (`launch_passive`, web streaming, native C++).  Do not insert
+is standardized boilerplate used across all Studio launchers (`launch_web`,
+`launch_native`, `launch_passive`), with `ViewerHandle` owning the active
+`handle.model`, `handle.data`, and `handle.model_path`. Do not insert
 domain-specific simulation logic, direct physics stepping, or ad-hoc state
-mutations into this loop. If your application needs custom behavior (e.g. custom
-stepping, perturbation forces, sensor logging, or RL resets):
+mutations into a runner loop. If your application needs custom behavior (e.g.
+custom stepping, perturbation forces, sensor logging, or RL resets):
 -   **Simulation Plugins**: Encapsulate the behavior in a sim-side plugin
-    subscribing to `StepEvent` or custom messages.
+    subscribing to `SimInitEvent`, `PostModelEvent`, `PreStepEvent`,
+    `StepEvent`, `PostStepEvent`, or custom messages.
 -   **Event Dispatch**: Dispatch an `Event` to the simulation thread rather than
     mutating state directly in the outer loop.
 -   **Edit `model` and `data` only from step-event handlers**: `sync()` sends
     `model.opt` when it changed across its `PreStepEvent` / `StepEvent` /
     `PostStepEvent` dispatch (see
     [Send Only What Changed](#send-only-what-changed-send_if_changes)), so an
-    `opt` edit made in this loop is never sent and the viewer's next snapshot
-    overwrites it; other model fields are not synced at all, so publish the
-    model again with `handle.set_model()` after editing them. `data` is sent
+    `opt` edit made outside those handlers is never sent and the viewer's next
+    snapshot overwrites it; other model fields are not synced at all, so publish
+    the model again with `handle.set_model()` after editing them. `data` is sent
     after every step, but `sync()` applies the viewer's resets, slider edits
     and perturbations before `PreStepEvent`, so controls or forces written in
-    this loop can be overwritten in the same `sync()`.
--   **Always Reassign `model, data = handle.sync(model, data)`**: Unlike legacy
-    `mujoco.viewer.Handle.sync()` (which took no arguments and returned `None`),
-    Studio's `ViewerHandle.sync(model, data)` expects the current model/data and
-    returns an updated `(model, data)` tuple. When plugins or user actions
-    dynamically reload models or attach specs (e.g. via `ModelEvent` or asset
-    drops), `handle.sync()` updates internal references and returns the newly
-    instantiated `model` and `data`. All Studio callers in the codebase reassign
-    `model, data = handle.sync(model, data)`; failing to capture the return
-    values leaves caller loops stepping a stale physics model while the viewer
-    renders the new one.
-
-> [!NOTE]
-> **Future Evolution of Sim Plugins & Handle Access:**
-> Strictly keeping the runner loop boilerplate-free might not be fully
-> achievable in all situations right now (for example, if sim plugins need
-> direct access to the handle or mechanisms not yet exposed via existing
-> lifecycle events). We will monitor how launcher boilerplate propagates and
-> evolve the event and plugin APIs accordingly. In the meantime, try to avoid
-> inserting simulation logic into the loop and consider carefully whether it
-> should be handled as an event or plugin instead.
+    an outer loop can be overwritten in the same `sync()`.
+-   **Custom Loops Owning `(model, data)`**: Must reassign
+    `model, data = handle.sync(model, data)`. When a script uses non-blocking
+    `.launch(...)` and owns its own `model` and `data` (as in
+    `sample/custom_sim_loop.py`), pass them to `handle.sync(model, data)` and
+    always rebind the returned `(model, data)` tuple. When a `LoadModelEvent`
+    (e.g. a dropped file or **Reload**) or a plugin's `handle.set_model()`
+    replaces the model, `handle.sync()` returns the newly instantiated `model`
+    and `data`; failing to capture the return values leaves the caller loop
+    stepping a stale physics model while the viewer renders the new one.
 
 ### 3. NumPy Views vs Copies in Events
 
@@ -702,7 +764,7 @@ self.history.append(app.data.xpos[body_id].copy())
 
 ### 4. Stepping Pacing & `NullSimulation` for Pure Viewers
 
-If you do not pass `step_control.StepControl()` to `sim_plugins`,
+If you do not pass `step_control.StepControl()` to `plugins`,
 `handle.sync()` will not pace itself against real wall-clock time. A tight
 `while handle.is_running(): handle.sync(...)` loop without a stepping plugin
 will spin at 100% CPU. Ensure you either include `StepControl()` or insert a

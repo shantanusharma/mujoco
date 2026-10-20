@@ -472,7 +472,7 @@ Similarly, we also provide a `Renderer
 ``mujoco.rendering.filament``. This class can be used to manage the lifetimes of key objects (such as the
 :ref:`mjrfContext` and :ref:`mjrfScene`) and provides useful functions for controlling the camera and reading pixels.
 
-Here is a mimimal example for rendering an mjModel with the filament renderer:
+Here is a minimal example for rendering an mjModel with the filament renderer:
 
 .. code-block:: python
 
@@ -971,6 +971,35 @@ successfully installed, ``cd`` outside of the ``mujoco`` directory and run
    As a reference, a working build configuration can be found in MuJoCo's
    `continuous integration setup <https://github.com/google-deepmind/mujoco/blob/main/.github/workflows/build.yml>`_ on
    GitHub.
+
+.. _PyBuildBazel:
+
+Building with Bazel
+-------------------
+
+The Python bindings can also be built with Bazel (see :ref:`inBuildBazel`). The ``@mujoco//python/mujoco`` target
+provides the ``mujoco`` package, so Python targets in your own Bazel module can depend on it directly. With a
+``bazel_dep`` on ``rules_python`` in your ``MODULE.bazel``:
+
+.. code-block:: python
+
+   load("@rules_python//python:py_binary.bzl", "py_binary")
+
+   py_binary(
+       name = "simulate_model",
+       srcs = ["simulate_model.py"],
+       deps = ["@mujoco//python/mujoco"],
+   )
+
+As in the wheel, the bindings link MuJoCo dynamically (``@mujoco//:mujoco_shared``), and the bundled plugins are
+separate shared libraries that ``mujoco`` loads when it is imported. C++ code in the same process that links MuJoCo the
+same way shares the engine with the bindings.
+
+To run the bindings' tests from the root of the cloned repository, use ``bazel test //python/...``.
+
+The Bazel build supports the Python versions listed in ``MODULE.bazel``, and installs the bindings' PyPI dependencies
+from ``pypi.org``. It covers the core bindings; rendering (``mujoco.Renderer`` and the GL contexts), the interactive
+viewer, MJX, and the USD exporter are not yet supported.
 
 
 .. _PyModule:

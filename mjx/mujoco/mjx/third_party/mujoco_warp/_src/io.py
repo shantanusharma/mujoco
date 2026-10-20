@@ -28,11 +28,9 @@ from mujoco.mjx.third_party.mujoco_warp._src import support
 from mujoco.mjx.third_party.mujoco_warp._src import types
 from mujoco.mjx.third_party.mujoco_warp._src import util_pkg
 from mujoco.mjx.third_party.mujoco_warp._src import warp_util
-from mujoco.mjx.third_party.mujoco_warp._src.collision_driver import MJ_COLLISION_TABLE
 from mujoco.mjx.third_party.mujoco_warp._src.set_const import set_const as set_const
 from mujoco.mjx.third_party.mujoco_warp._src.set_const import set_const_0 as set_const_0
 from mujoco.mjx.third_party.mujoco_warp._src.set_const import set_const_fixed as set_const_fixed
-from mujoco.mjx.third_party.mujoco_warp._src.set_const import set_const_spring as set_const_spring
 from mujoco.mjx.third_party.mujoco_warp._src.set_const import set_length_range as set_length_range
 
 wp.set_module_options({"default_grid_stride": False})
@@ -205,6 +203,26 @@ def _flex_simple(mjm: mujoco.MjModel, f: int) -> bool:
   return True
 
 
+def _eff_flex_stiff_possible(mjm: mujoco.MjModel, f: int) -> bool:
+  """Whether flex f contributes elastic stiffness to the metric, see mj_effFlexStiffPossible."""
+  if mjm.flex_rigid[f]:
+    return False
+  badr = int(mjm.flex_bendingadr[f])
+  if mjm.flex_dim[f] == 1:
+    return badr >= 0
+  sadr = int(mjm.flex_stiffnessadr[f])
+  if sadr >= 0 and mjm.flex_stiffness[sadr] != 0 and mjm.flex_edgeequality[f] != 3:
+    return True
+  if badr < 0:
+    return False
+  end = mjm.nflexbending
+  for g in range(f + 1, mjm.nflex):
+    if mjm.flex_bendingadr[g] >= 0:
+      end = int(mjm.flex_bendingadr[g])
+      break
+  return bool(np.any(mjm.flex_bending[badr:end] != 0))
+
+
 def _get_efm_data(mjm: mujoco.MjModel) -> mujoco.MjData | None:
   """Runs position kinematics under discrete integrator on a temp MjData for flex stiffness."""
   if mjm.nflex == 0:
@@ -349,7 +367,8 @@ def put_model(mjm: mujoco.MjModel, batch_sizes: dict[str, int] | None = None) ->
     raise NotImplementedError("Flex equality constraints are not supported with sleeping enabled.")
 
   if mjm.opt.noslip_iterations > 0:
-    raise NotImplementedError(f"noslip solver not implemented.")
+    if mjm.opt.integrator == mujoco.mjtIntegrator.mjINT_DISCRETE:
+      raise NotImplementedError("noslip solver not implemented for the discrete integrator.")
 
   if (mjm.body_plugin != -1).any():
     raise NotImplementedError("Body plugins not supported.")
@@ -455,8 +474,6 @@ def put_model(mjm: mujoco.MjModel, batch_sizes: dict[str, int] | None = None) ->
     else:
       setattr(opt, f.name, f.type(getattr(opt, f.name)))
 
-  # create stat
-  stat = types.Statistic(meaninertia=_create_array([mjm.stat.meaninertia], types.array("*", float), {"*": 1}))
 
   # create model
   m = types.Model(**{f.name: getattr(mjm, f.name, None) for f in dataclasses.fields(types.Model)})
@@ -485,7 +502,6 @@ def put_model(mjm: mujoco.MjModel, batch_sizes: dict[str, int] | None = None) ->
         m.tendon_dampingpoly[trnid] += poly_k * gear2
 
   m.opt = opt
-  m.stat = stat
   m.callback = types.Callback()
 
   m.nv_pad = _get_padded_sizes(
@@ -509,6 +525,9 @@ def put_model(mjm: mujoco.MjModel, batch_sizes: dict[str, int] | None = None) ->
       raise NotImplementedError("Flex internal collisions are not implemented.")
     if (mjm.flex_rigid != 0).any():
       raise NotImplementedError("Rigid flexes are not implemented.")
+    # TODO(team): skip element pairs driven by a common grid node, as in mjc_ElemSharedNode
+    if np.any((mjm.flex_interp != 0) & (mjm.flex_selfcollide != 0) & ((mjm.flex_contype & mjm.flex_conaffinity) != 0)):
+      raise NotImplementedError("Self-collision of interpolated flexes (dof=trilinear or quadratic) is not implemented.")
   m.nmaxcondim = np.concatenate(condim_arrays).max()
   m.nmaxpyramid = np.maximum(1, 2 * (m.nmaxcondim - 1))
   m.has_sdf_geom = (mjm.geom_type == mujoco.mjtGeom.mjGEOM_SDF).any()
@@ -540,12 +559,21 @@ def put_model(mjm: mujoco.MjModel, batch_sizes: dict[str, int] | None = None) ->
     and any(
       mjm.flex_interp[f] == 0
       and not mjm.flex_rigid[f]
-      and mjm.flex_dim[f] >= 2
       and not flex_simple[f]
-      and (mjm.flex_bendingadr[f] >= 0 or (mjm.flex_stiffnessadr[f] >= 0 and mjm.flex_stiffness[mjm.flex_stiffnessadr[f]] != 0))
+      and (
+        (mjm.flex_dim[f] == 1 and mjm.flex_bendingadr[f] >= 0)
+        or (
+          mjm.flex_dim[f] >= 2
+          and (
+            mjm.flex_bendingadr[f] >= 0 or (mjm.flex_stiffnessadr[f] >= 0 and mjm.flex_stiffness[mjm.flex_stiffnessadr[f]] != 0)
+          )
+        )
+      )
       for f in range(mjm.nflex)
     )
   )
+  # 1D rod bending is integrated explicitly under implicit and implicitfast, unlike 2D and 3D
+  m.has_flex_stiff_dim23 = bool(any(mjm.flex_dim[f] > 1 and _eff_flex_stiff_possible(mjm, f) for f in range(mjm.nflex)))
   if (
     mjm.opt.integrator == mujoco.mjtIntegrator.mjINT_DISCRETE
     and mjm.opt.solver == mujoco.mjtSolver.mjSOL_NEWTON
@@ -663,6 +691,11 @@ def put_model(mjm: mujoco.MjModel, batch_sizes: dict[str, int] | None = None) ->
     bodies.setdefault(body_depth[i], []).append(i)
   m.body_tree = tuple(wp.array(bodies[i], dtype=int) for i in sorted(bodies))
 
+  # Subtree sizes include the body itself; parents precede their descendants.
+  m.body_subtreenum = np.ones(mjm.nbody, dtype=int)
+  for i in reversed(range(1, mjm.nbody)):
+    m.body_subtreenum[mjm.body_parentid[i]] += m.body_subtreenum[i]
+
   # branch-based traversal data
   children_count = np.bincount(mjm.body_parentid[1:], minlength=mjm.nbody)
   ancestor_chain = lambda b: ancestor_chain(mjm.body_parentid[b]) + [b] if b else []
@@ -703,8 +736,7 @@ def put_model(mjm: mujoco.MjModel, batch_sizes: dict[str, int] | None = None) ->
       dof_adrs = mjm.jnt_dofadr[jnt_free_adrs]
       tree_ids = mjm.dof_treeid[dof_adrs]
       tree_dof6 = mjm.tree_dofnum[tree_ids] == 6
-      mass_match = mjm.body_subtreemass[b_free] == mjm.body_mass[b_free]
-      body_is_free[b_free] = tree_dof6 & mass_match
+      body_is_free[b_free] = tree_dof6
   m.body_is_free = body_is_free
   m.body_freeadr = np.nonzero(m.body_is_free)[0]
   body_fluid_box = np.zeros(mjm.nbody, dtype=bool)
@@ -750,6 +782,8 @@ def put_model(mjm: mujoco.MjModel, batch_sizes: dict[str, int] | None = None) ->
   weld_parentid2 = mjm.body_weldid[mjm.body_parentid[weldid2]]
 
   self_collision = weldid1 == weldid2
+  # both weld bodies dof-less: no forces can act, skip (matches filterBodyPair)
+  no_dofs = (mjm.body_dofnum[weldid1] == 0) & (mjm.body_dofnum[weldid2] == 0)
   parent_child_collision = (
     filterparent & (weldid1 != 0) & (weldid2 != 0) & ((weldid1 == weld_parentid2) | (weldid2 == weld_parentid1))
   )
@@ -757,7 +791,7 @@ def put_model(mjm: mujoco.MjModel, batch_sizes: dict[str, int] | None = None) ->
   exclude = np.isin((bodyid1 << 16) + bodyid2, mjm.exclude_signature)
 
   nxn_pairid_contact = -1 * np.ones(len(geom1), dtype=int)
-  nxn_pairid_contact[~(mask & ~self_collision & ~parent_child_collision & ~exclude)] = -2
+  nxn_pairid_contact[~(mask & ~self_collision & ~no_dofs & ~parent_child_collision & ~exclude)] = -2
 
   # contact pairs
   def upper_tri_index(n, i, j):
@@ -834,74 +868,6 @@ def put_model(mjm: mujoco.MjModel, batch_sizes: dict[str, int] | None = None) ->
       minlength=len(types.GeomType) * (len(types.GeomType) + 1) // 2,
     )
   )
-
-  # check for unsupported margin + multicontact / box-box CCD combinations
-  use_multiccd = (mjm.opt.disableflags & types.DisableBit.MULTICCD) == 0
-  nativeccd_disabled = mjm.opt.disableflags & types.DisableBit.NATIVECCD
-  BOX = int(mujoco.mjtGeom.mjGEOM_BOX)
-  MESH = int(mujoco.mjtGeom.mjGEOM_MESH)
-
-  # TODO(team): remove after implementing multicontact support for CCD pairs.
-  if use_multiccd:
-    unsupported_multiccd_pairs = []
-    for (g1, g2), col_type in MJ_COLLISION_TABLE.items():
-      if g1 == types.GeomType.BOX and g2 == types.GeomType.BOX and nativeccd_disabled:
-        continue
-      if col_type == types.CollisionType.CONVEX:
-        if g1 in (types.GeomType.SPHERE, types.GeomType.ELLIPSOID) or g2 in (
-          types.GeomType.SPHERE,
-          types.GeomType.ELLIPSOID,
-        ):
-          continue
-        if (g1, g2) not in (
-          (types.GeomType.BOX, types.GeomType.BOX),
-          (types.GeomType.BOX, types.GeomType.MESH),
-          (types.GeomType.MESH, types.GeomType.MESH),
-          (types.GeomType.CYLINDER, types.GeomType.CYLINDER),
-          (types.GeomType.CYLINDER, types.GeomType.BOX),
-          (types.GeomType.CYLINDER, types.GeomType.MESH),
-        ):
-          if m.geom_pair_type_count[geom_trid_index(int(g1), int(g2))] > 0:
-            unsupported_multiccd_pairs.append((g1.name, g2.name))
-    if unsupported_multiccd_pairs:
-      warnings.warn(
-        "MULTICCD is enabled, but the scene contains CCD pairs without multicontact support:"
-        f" {unsupported_multiccd_pairs}. At most 1 contact will be generated for these pairs."
-      )
-
-  has_boxbox = m.geom_pair_type_count[geom_trid_index(BOX, BOX)] > 0
-  has_multiccd_pairs = has_boxbox or (
-    use_multiccd
-    and (m.geom_pair_type_count[geom_trid_index(BOX, MESH)] > 0 or m.geom_pair_type_count[geom_trid_index(MESH, MESH)] > 0)
-  )
-
-  if has_multiccd_pairs:
-
-    def _check_margin(name, t1, t2, margin):
-      if use_multiccd:
-        raise NotImplementedError(
-          f"{name} has non-zero margin ({margin}) with MULTICCD enabled. Set margin to 0 or disable MULTICCD."
-        )
-      if t1 == BOX and t2 == BOX and not nativeccd_disabled:
-        raise NotImplementedError(
-          f"{name} has non-zero margin ({margin}) with NATIVECCD enabled. Set margin to 0 or disable NATIVECCD."
-        )
-
-    geom_name = lambda g: mujoco.mj_id2name(mjm, mujoco.mjtObj.mjOBJ_GEOM, g) or str(g)
-
-    for idx in np.nonzero(nxn_include & (nxn_pairid_contact == -1))[0]:
-      g1, g2 = int(geom1[idx]), int(geom2[idx])
-      t1, t2 = int(mjm.geom_type[g1]), int(mjm.geom_type[g2])
-      m1, m2 = float(mjm.geom_margin[g1]), float(mjm.geom_margin[g2])
-      if (m1 or m2) and t1 in (BOX, MESH) and t2 in (BOX, MESH):
-        _check_margin(f"geom pair ({geom_name(g1)}, {geom_name(g2)})", t1, t2, (m1, m2))
-
-    for pid in range(mjm.npair):
-      g1, g2 = int(mjm.pair_geom1[pid]), int(mjm.pair_geom2[pid])
-      t1, t2 = int(mjm.geom_type[g1]), int(mjm.geom_type[g2])
-      pm = float(mjm.pair_margin[pid])
-      if pm and t1 in (BOX, MESH) and t2 in (BOX, MESH):
-        _check_margin(f"pair {pid} ({geom_name(g1)}, {geom_name(g2)})", t1, t2, pm)
 
   # filter plugins for only geom plugins, drop the rest
   m.plugin, m.plugin_attr = [], []
@@ -1299,6 +1265,17 @@ def put_model(mjm: mujoco.MjModel, batch_sizes: dict[str, int] | None = None) ->
       for face_idx in range(nfaces):
         flex_face_map.append((fi, face_idx))
       face_offset += nfaces
+
+  # 1D rod bending hinges: (flex id, address of the hinge data in flex_bending)
+  flex_rodhinge_map = []
+  for fi in range(mjm.nflex):
+    bendingadr = int(mjm.flex_bendingadr[fi])
+    if mjm.flex_dim[fi] != 1 or mjm.flex_interp[fi] != 0 or mjm.flex_rigid[fi] or bendingadr < 0:
+      continue
+    for h in range(int(mjm.flex_bending[bendingadr])):
+      flex_rodhinge_map.append((fi, bendingadr + 1 + types.ROD_HINGE_SIZE * h))
+  m.nflexrodhinge = len(flex_rodhinge_map)
+  m.flex_rodhinge_map = np.array(flex_rodhinge_map, dtype=np.int32).reshape(-1, 2)
 
   if not flex_bend_interp_map:
     m.nflexbend_interp = 0
@@ -1732,8 +1709,12 @@ def _allocate_island_arrays(
     setattr(d, name, wp.array(arr, dtype=int))
 
   # DOF mapping arrays sized by nv
-  map_dof2idof = np.tile(mjd.map_dof2idof[:nv], (nworld, 1))
-  map_idof2dof = np.tile(mjd.map_idof2dof[:nv], (nworld, 1))
+  if nisland > 0:
+    map_dof2idof = np.tile(mjd.map_dof2idof[:nv], (nworld, 1))
+    map_idof2dof = np.tile(mjd.map_idof2dof[:nv], (nworld, 1))
+  else:
+    map_dof2idof = np.zeros((nworld, nv), dtype=np.int32)
+    map_idof2dof = np.zeros((nworld, nv), dtype=np.int32)
   dof_islandid = np.full((nworld, nv), -1, dtype=np.int32)
   if nisland > 0 and nidof > 0:
     dof_islandid[:, :nidof] = mjd.dof_island[mjd.map_idof2dof[:nidof]]
@@ -1760,8 +1741,6 @@ def _allocate_island_arrays(
 
 
 _COMPACT_DATA_FIELDS: tuple[str, ...] = (
-  "ctol",
-  "cls_tol",
   "cdof_tri_row",
   "cdof_tri_col",
   "cM",
@@ -1789,7 +1768,7 @@ def _allocate_compact_arrays(
   """Allocate workspace for the compacted dense factor/solve (when nvmax is requested).
 
   Mirrors the island-local ``i*`` Data fields with a ``c*`` (compact) prefix. The
-  constant model-shadows (tolerances, dof-pair indices) are derived on the host since
+  constant dof-pair indices are derived on the host since
   they depend only on nvmax_pad; the workspace shadows are sized by nvmax_pad so the
   blocked Cholesky never reads out of bounds on its partial tile. When the user does not
   request compaction (nvmax is None) everything is allocated empty.
@@ -1803,21 +1782,12 @@ def _allocate_compact_arrays(
   njp = njmax_pad if compact else 0
 
   if compact:
-    # match the float32 tolerance clamp applied in put_model; rescale by nv/nvmax_pad so
-    # the solver's nv-normalized convergence test matches the full-model baseline.
-    scale = float(mjm.nv) / float(nvmax_pad)
-    tol = max(float(mjm.opt.tolerance), 1e-6)
-    ls_tol = float(mjm.opt.ls_tolerance)
-    d.ctol = wp.array([tol * scale], dtype=float)
-    d.cls_tol = wp.array([ls_tol * scale], dtype=float)
     # all (i, j) DOF pairs of the nvmax_pad-wide compacted Hessian (the global dof_tri,
     # triu over full nv, would index out of bounds).
     idx = np.arange(nvmax_pad, dtype=np.int32)
     d.cdof_tri_row = wp.array(np.repeat(idx, nvmax_pad), dtype=int)
     d.cdof_tri_col = wp.array(np.tile(idx, nvmax_pad), dtype=int)
   else:
-    d.ctol = wp.empty(0, dtype=float)
-    d.cls_tol = wp.empty(0, dtype=float)
     d.cdof_tri_row = wp.empty(0, dtype=int)
     d.cdof_tri_col = wp.empty(0, dtype=int)
 
@@ -2775,9 +2745,9 @@ def reset_data(m: types.Model, d: types.Data, reset: Optional[wp.array] = None):
         qacc_out[worldid, i] = 0.0
     for i in range(nu):
       ctrl_out[worldid, i] = 0.0
-      if i < na:
-        act_out[worldid, i] = 0.0
-        act_dot_out[worldid, i] = 0.0
+    for i in range(na):
+      act_out[worldid, i] = 0.0
+      act_dot_out[worldid, i] = 0.0
     for i in range(neq):
       eq_active_out[worldid, i] = eq_active0[i]
     for i in range(nflex):

@@ -41,17 +41,16 @@ import warnings
 
 import mujoco
 from mujoco.experimental.studio import messages
-from mujoco.experimental.studio import parser
+from mujoco.experimental.studio import plugin
 from mujoco.experimental.studio import sim
 from mujoco.experimental.studio import sim_history
+from mujoco.experimental.studio import step_control
 from mujoco.experimental.studio import ux
 from mujoco.experimental.studio import viewer_app_events
 from mujoco.experimental.studio import viewer_protocol
 from mujoco.experimental.studio import viewer_utils
 
 from mujoco.experimental.dear_imgui import dear_imgui as imgui
-
-logger = logging.getLogger(__name__)
 
 
 class _StudioLogHandler(logging.Handler):
@@ -173,7 +172,9 @@ def install_console_hooks() -> None:
       # attributes them to the parser. Show them on every load, not just the
       # first time, so that reloading a model shows its warnings again.
       warnings.filterwarnings(
-          'always', category=UserWarning, module=re.escape(parser.__name__)
+          'always',
+          category=UserWarning,
+          module=re.escape(__name__.rpartition('.')[0] + '.parser'),
       )
       _hooks = _ConsoleHooks()
       warnings.showwarning = _hooks.showwarning
@@ -219,17 +220,21 @@ class ViewerAppConfig:
   show_inspector: bool = True
 
 
-class ViewerApp:
-  """ViewerApp wraps a Viewer and adds Studio UI/UX."""
+# Sim-side plugins that back ViewerApp's step control and history scrubbing UI.
+# Unpack alongside ViewerApp() in plugins=[...], or pass individual plugins
+# when replacing one (e.g. a custom StepEvent plugin).
+SIM_PLUGINS: tuple[plugin.SimPlugin, ...] = (
+    step_control.StepControl(),
+    sim_history.SimHistory(),
+)
 
-  @property
-  def viewer(self) -> viewer_protocol.Viewer:
-    assert self._viewer is not None
-    return self._viewer
 
-  @viewer.setter
-  def viewer(self, value: viewer_protocol.Viewer | None) -> None:
-    self._viewer = value
+class ViewerApp(plugin.ViewerPlugin):
+  """ViewerApp wraps a Viewer and adds Studio UI/UX.
+
+  Pair with ``*SIM_PLUGINS`` in ``plugins=[...]`` for the default sim-side
+  real-time CPU stepping and history scrubbing.
+  """
 
   @property
   def model(self) -> mujoco.MjModel:
@@ -257,25 +262,42 @@ class ViewerApp:
 
   def __init__(self, config: ViewerAppConfig | None = None) -> None:
     install_console_hooks()
-    self._viewer: viewer_protocol.Viewer | None = None
+    self._model_path: str = ''
     self.theme = ux.load_theme()
     self.config = config or ViewerAppConfig()
     self.status = 'Ready'
     self._reset_app_state()
 
   @messages.handler(priority=messages.Priority.CRITICAL)
-  def _on_viewer_init(self, event: viewer_protocol.ViewerInitEvent) -> None:
-    self.viewer = event.viewer
+  def _on_viewer_init(self, _: plugin.ViewerInitEvent) -> None:
     # Creating the web viewer configures the web server's logger.
     install_console_hooks()
     self.theme = ux.load_settings(def_theme=self.theme)
     ux.setup_theme(self.theme)
+    self.align_camera()
     self.viewer.dispatch(ViewerAppInitEvent(viewer_app=self))
 
   def _reset_app_state(self) -> None:
     """Resets ViewerApp-specific state (step control, ux)."""
     self.step_control_state = sim.StepControl()
     self.ux_state = ux.UxState()
+    if self._viewer is not None:
+      self.align_camera()
+
+  def _reload_app_state(self, model: mujoco.MjModel) -> None:
+    """Reloads ViewerApp state, keeping step control, speed, and camera."""
+    old = self.ux_state
+    self.ux_state = ux.UxState()
+    self.ux_state.speed_index = old.speed_index
+    camera = self.viewer.camera
+    tracks_missing_body = (
+        camera.type == int(mujoco.mjtCamera.mjCAMERA_TRACKING)
+        and camera.trackbodyid >= model.nbody
+    )
+    if old.camera_index < model.ncam and not tracks_missing_body:
+      self.ux_state.camera_index = old.camera_index
+    else:
+      self.align_camera()
 
   @contextlib.contextmanager
   def _send_if_changes(self) -> Iterator[None]:
@@ -300,30 +322,9 @@ class ViewerApp:
     else:
       mujoco.mjv_defaultFreeCamera(self.model, self.viewer.camera)
 
-  def _load_model(self, path: str) -> None:
-    """Loads a model file and sends it to the sim side and viewer plugins.
-
-    If the file cannot be loaded, logs an error and does nothing else.
-
-    Args:
-      path: The model file to load.
-    """
-    try:
-      data = parser.parse(path)
-    except Exception as ex:  # pylint: disable=broad-except
-      logger.error('Could not load model %r: %s', path, ex)
-      return
-    # Notify all handlers on the sim side.
-    self.viewer.send_to_sim(messages.ModelEvent(model=data.model, path=path))
-    # Notify all handlers on the viewer side.
-    self.viewer.dispatch(messages.ModelEvent(model=data.model, path=path))
-    # Discard all snapshots, including any stale state snapshots.
-    self.viewer.get_sim_snapshots()
-
   def reload_model(self) -> None:
-    """Reload the current model from its file."""
-    if self.model_path:
-      self._load_model(self.model_path)
+    """Asks the sim to reload the current model from its file."""
+    self.viewer.send_to_sim(messages.LoadModelEvent())
 
   def close(self) -> None:
     self.viewer.dispatch(messages.ExitEvent())
@@ -456,10 +457,11 @@ class ViewerApp:
     Handles keyboard input e.g., for keybindings or camera motion.
     Applies the perturbations and advances the physics.
     """
+    # A dropped file is loaded on the sim thread by the ViewerHandle, which
+    # publishes the new model back to the viewer as a ModelEvent.
     drop_file = self.viewer.get_drop_file()
-    # Handle file drop: update viewer model/data, reset app state, notify sim.
     if drop_file:
-      self._load_model(drop_file)
+      self.viewer.send_to_sim(messages.LoadModelEvent(path=drop_file))
 
     with self._send_if_changes():
       # Handle user input.
@@ -725,8 +727,12 @@ class ViewerApp:
 
   @messages.handler(priority=messages.Priority.INTERNAL)
   def _on_post_model(self, event: messages.PostModelEvent) -> None:
-    del event  # Model/data are owned by the Viewer.
-    self._reset_app_state()
+    same_scene = bool(event.path and event.path == self._model_path)
+    self._model_path = event.path
+    if same_scene:
+      self._reload_app_state(event.model)
+    else:
+      self._reset_app_state()
 
   @messages.handler(priority=messages.Priority.INTERNAL)
   def _on_exit(self, _: messages.ExitEvent) -> None:

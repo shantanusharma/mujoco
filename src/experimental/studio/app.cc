@@ -554,6 +554,14 @@ void App::Render() {
   window_->Present(pixels_);
 }
 
+std::vector<std::byte> App::RenderToTexture(mjvCamera* camera, int width,
+                                            int height) {
+  std::vector<std::byte> output(width * height * 3);
+  renderer_->RenderToTexture(model(), data(), camera, width, height,
+                             output.data());
+  return output;
+}
+
 void App::BuildModel(const BuildModelInfo& info) {
   if (std::holds_alternative<RecompileFromSpec>(info)) {
     const KeyframeSelection saved_key =
@@ -1317,8 +1325,27 @@ void App::BuildGui() {
 
   if (tmp_.picture_in_picture) {
     if (ImGui::Begin("Picture-in-Picture", &tmp_.picture_in_picture)) {
-      PipGui(model(), data(), window_->GetAspectRatio(),
-                       renderer_.get(), &tmp_.pips);
+      auto render_cb = [this](const PipState& pip, int width, int height) {
+        mjtByte* flags = renderer_->GetRenderFlags();
+        const int prev_depth = flags[mjRND_DEPTH];
+        const int prev_segment = flags[mjRND_SEGMENT];
+        flags[mjRND_DEPTH] = (pip.mode == PipState::Depth) ? 1 : 0;
+        flags[mjRND_SEGMENT] = (pip.mode == PipState::Segmentation) ? 1 : 0;
+
+        mjvCamera camera;
+        mjv_defaultCamera(&camera);
+        camera.type = mjCAMERA_FIXED;
+        camera.fixedcamid = pip.camera;
+
+        std::vector<std::byte> output = RenderToTexture(&camera, width, height);
+        int id = renderer_->UploadImage(pip.texture, output, width, height);
+
+        flags[mjRND_DEPTH] = prev_depth;
+        flags[mjRND_SEGMENT] = prev_segment;
+        return id;
+      };
+
+      PipGui(model(), window_->GetAspectRatio(), render_cb, &tmp_.pips);
     }
     ImGui::End();
   }
@@ -2366,9 +2393,8 @@ void App::FileDialogGui() {
         case UiTempState::FileDialog_SaveScreenshot: {
           const int width = window_->GetWidth();
           const int height = window_->GetHeight();
-          std::vector<std::byte> buffer(width * height * 3);
-          renderer_->RenderToTexture(model(), data(), &camera_, width, height,
-                                     buffer.data());
+          std::vector<std::byte> buffer =
+              RenderToTexture(&camera_, width, height);
           SaveToWebp(width, height, buffer.data(), res.path);
           break;
         }

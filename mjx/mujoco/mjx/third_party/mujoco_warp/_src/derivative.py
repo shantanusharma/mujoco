@@ -26,6 +26,9 @@ from mujoco.mjx.third_party.mujoco_warp._src import util_misc
 from mujoco.mjx.third_party.mujoco_warp._src.passive import build_efm_contact
 from mujoco.mjx.third_party.mujoco_warp._src.passive import ellipsoid_max_moment
 from mujoco.mjx.third_party.mujoco_warp._src.passive import geom_semiaxes
+from mujoco.mjx.third_party.mujoco_warp._src.passive import rod_hinge
+from mujoco.mjx.third_party.mujoco_warp._src.passive import rod_hinge_jacobian
+from mujoco.mjx.third_party.mujoco_warp._src.passive import rod_hinge_weights
 from mujoco.mjx.third_party.mujoco_warp._src.support import next_act
 from mujoco.mjx.third_party.mujoco_warp._src.types import MJ_MINVAL
 from mujoco.mjx.third_party.mujoco_warp._src.types import BiasType
@@ -2234,6 +2237,86 @@ def _eff_flex_bend_stiff(
 
 
 @wp.kernel
+def _eff_flex_rod_stiff(
+  # Model:
+  opt_timestep: wp.array[float],
+  opt_disableflags: int,
+  body_weldid: wp.array[int],
+  body_dofnum: wp.array[int],
+  body_dofadr: wp.array[int],
+  flex_vertadr: wp.array[int],
+  flex_vertbodyid: wp.array[int],
+  flex_bending: wp.array[float],
+  flex_damping: wp.array[float],
+  efm_K_rownnz: wp.array[int],
+  efm_K_rowadr: wp.array[int],
+  efm_K_colind: wp.array[int],
+  flex_simple: wp.array[bool],
+  flex_rodhinge_map: wp.array[wp.vec2i],
+  # Data in:
+  xmat_in: wp.array2d[wp.mat33],
+  flexvert_xpos_in: wp.array2d[wp.vec3],
+  # Data out:
+  efm_K_val_out: wp.array2d[float],
+):
+  """Adds the rod hinge stiffness J'(h^2 Wk + h damping Wd)J in the vertex body frames."""
+  worldid, hingeid = wp.tid()
+  mapping = flex_rodhinge_map[hingeid]
+  f = mapping[0]
+  adr = mapping[1]
+  if not flex_simple[f]:
+    return
+
+  timestep = opt_timestep[worldid % opt_timestep.shape[0]]
+  s1 = 0.0 if (opt_disableflags & DisableBit.SPRING) else timestep * timestep
+  s2 = 0.0 if (opt_disableflags & DisableBit.DAMPER) else timestep
+  sd = s2 * flex_damping[f]
+  if s1 == 0.0 and sd == 0.0:
+    return
+
+  vbase = flex_vertadr[f]
+  verts = wp.vec3i(vbase + int(flex_bending[adr]), vbase + int(flex_bending[adr + 1]), vbase + int(flex_bending[adr + 2]))
+  ok, kb, A0, A1 = rod_hinge(
+    flexvert_xpos_in[worldid, verts[0]], flexvert_xpos_in[worldid, verts[1]], flexvert_xpos_in[worldid, verts[2]]
+  )
+  if not ok:
+    return
+
+  # W = s1 * Wk + s2 * damping * Wd, with Wk = 2k I
+  k = flex_bending[adr + 3]
+  _, Wd = rod_hinge_weights(kb, k)
+  W = (2.0 * s1 * k) * wp.identity(n=3, dtype=float) + sd * Wd
+
+  dofs = wp.vec3i(-1, -1, -1)
+  bodies = wp.vec3i(-1, -1, -1)
+  for i in range(3):
+    bodyid = flex_vertbodyid[verts[i]]
+    if bodyid >= 0:
+      bi = body_weldid[bodyid]
+      bodies[i] = bi
+      if body_dofnum[bi] == 3:
+        dofs[i] = body_dofadr[bi]
+
+  for i in range(3):
+    dof_i = dofs[i]
+    if dof_i < 0 or efm_K_rownnz[dof_i] == 0:
+      continue
+    JiT_W = wp.transpose(rod_hinge_jacobian(A0, A1, i)) * W
+    R_bi_T = wp.transpose(xmat_in[worldid, bodies[i]])
+    for j in range(3):
+      dof_j = dofs[j]
+      if dof_j < 0:
+        continue
+      blkd = R_bi_T * (JiT_W * rod_hinge_jacobian(A0, A1, j)) * xmat_in[worldid, bodies[j]]
+      for r in range(3):
+        row = dof_i + r
+        idx = _find_csr_col(efm_K_rowadr[row], efm_K_rownnz[row], dof_j, efm_K_colind)
+        if idx >= 0:
+          for c in range(3):
+            wp.atomic_add(efm_K_val_out, worldid, idx + c, blkd[r, c])
+
+
+@wp.kernel
 def _eff_flex_interp_stiff(
   # Model:
   opt_timestep: wp.array[float],
@@ -3065,6 +3148,30 @@ def eff_build(m: Model, d: Data):
       outputs=[d.efm_K_val],
     )
 
+    wp.launch(
+      _eff_flex_rod_stiff,
+      dim=(d.nworld, m.nflexrodhinge),
+      inputs=[
+        m.opt.timestep,
+        m.opt.disableflags,
+        m.body_weldid,
+        m.body_dofnum,
+        m.body_dofadr,
+        m.flex_vertadr,
+        m.flex_vertbodyid,
+        m.flex_bending,
+        m.flex_damping,
+        m.efm_K_rownnz,
+        m.efm_K_rowadr,
+        m.efm_K_colind,
+        m.flex_simple,
+        m.flex_rodhinge_map,
+        d.xmat,
+        d.flexvert_xpos,
+      ],
+      outputs=[d.efm_K_val],
+    )
+
     if m.flex_interp_assemblable:
       wp.launch(
         _eff_flex_interp_stiff,
@@ -3172,6 +3279,7 @@ def eff_shift(m: Model, d: Data):
   if not (m.opt.disableflags & DisableBit.SPRING):
     passive.flex_hessian(m, d)
     passive.flex_bend_mul(m, d, d.efm_c, d.qvel, s1_in=-1.0, s2_in=0.0, use_timestep=True, non_simple_only=False)
+    passive.flex_rod_mul(m, d, d.efm_c, d.qvel, s1_in=-1.0, s2_in=0.0, use_timestep=True, non_simple_only=False)
     passive.flex_stretch_mul(m, d, d.efm_c, d.qvel, s1_in=-1.0, s2_in=0.0, use_timestep=True, non_simple_only=False)
 
     wp.launch(
@@ -3391,6 +3499,17 @@ def eff_actuation(m: Model, d: Data):
     smooth._factor_i_sparse(m, d, d.qH, d.qHLD[:, m.qLD_block_total :], d.qHDiagInv)
 
 
+def eff_mul_m_scratch(m: Model, d: Data) -> tuple[Optional[tuple], Optional[tuple]]:
+  """Builds the eff_mul_m efm_con and flex_scratch arguments.
+
+  eff_mul_m allocates them on each call if they are not passed, which is not allowed inside
+  wp.capture_while: build them before the loop instead.
+  """
+  efm_con = build_efm_contact(m, d) if m.has_flex_passive else None
+  flex_scratch = passive.flex_stretch_scratch(m, d) if m.nflex and m.nflexvert else None
+  return efm_con, flex_scratch
+
+
 @event_scope
 def eff_mul_m(
   m: Model,
@@ -3399,8 +3518,13 @@ def eff_mul_m(
   vec: wp.array2d[float],
   skip: Optional[wp.array] = None,
   efm_con: Optional[tuple] = None,
+  flex_scratch: Optional[tuple] = None,
 ):
-  """Multiplies vector by effective metric M_hat = M + h*D + h^2*K."""
+  """Multiplies vector by effective metric M_hat = M + h*D + h^2*K.
+
+  Inside wp.capture_while, where memory cannot be allocated, pass efm_con and flex_scratch
+  from eff_mul_m_scratch, built before the loop.
+  """
   support.mul_m(m, d, res, vec, skip=skip)
   if m.opt.integrator == IntegratorType.DISCRETE:
     check_skip = skip is not None
@@ -3492,8 +3616,18 @@ def eff_mul_m(
       (m.opt.disableflags & DisableBit.SPRING) and (m.opt.disableflags & DisableBit.DAMPER)
     ):
       passive.flex_bend_mul(m, d, res, vec, s1_in=1.0, s2_in=1.0, use_timestep=True, non_simple_only=(m.nefmK > 0), skip=skip)
+      passive.flex_rod_mul(m, d, res, vec, s1_in=1.0, s2_in=1.0, use_timestep=True, non_simple_only=(m.nefmK > 0), skip=skip)
       passive.flex_stretch_mul(
-        m, d, res, vec, s1_in=1.0, s2_in=1.0, use_timestep=True, non_simple_only=(m.nefmK > 0), skip=skip
+        m,
+        d,
+        res,
+        vec,
+        s1_in=1.0,
+        s2_in=1.0,
+        use_timestep=True,
+        non_simple_only=(m.nefmK > 0),
+        skip=skip,
+        scratch=flex_scratch,
       )
     if not m.flex_interp_assemblable and not (
       (m.opt.disableflags & DisableBit.SPRING) and (m.opt.disableflags & DisableBit.DAMPER)
@@ -3987,7 +4121,8 @@ def eff_solve(m: Model, d: Data, qacc: wp.array2d[float], qfrc: Optional[wp.arra
 
   efm_nsolving.fill_(d.nworld)
   efm_iter.zero_()
-  efm_con = build_efm_contact(m, d) if (has_spring_or_damper and m.has_flex_passive) else None
+  # allocated here since _pcg_iteration may run inside wp.capture_while
+  efm_con, flex_scratch = eff_mul_m_scratch(m, d)
 
   eff_prec(m, d, efm_z, rhs)
   wp.launch_tiled(
@@ -4015,7 +4150,7 @@ def eff_solve(m: Model, d: Data, qacc: wp.array2d[float], qfrc: Optional[wp.arra
   max_it = m.opt.iterations
 
   def _pcg_iteration():
-    eff_mul_m(m, d, efm_Ap, efm_p, skip=efm_done, efm_con=efm_con)
+    eff_mul_m(m, d, efm_Ap, efm_p, skip=efm_done, efm_con=efm_con, flex_scratch=flex_scratch)
     wp.launch_tiled(
       _pcg_pAp_step_and_check_tiled,
       dim=d.nworld,

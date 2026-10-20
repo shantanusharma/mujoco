@@ -28,6 +28,8 @@
 #include <gtest/gtest.h>
 #include <mujoco/mjtype.h>
 #include <mujoco/mujoco.h>
+#include "src/engine/engine_collision_convex.h"
+#include "src/engine/engine_collision_gjk.h"
 #include "test/fixture.h"
 
 namespace mujoco {
@@ -668,6 +670,178 @@ TEST_F(ContinuousCollisionTest, CandidatesCoverARotatingTriangle) {
                              radii.data(), nfv, cand, ncand, cgap.data(),
                              pt2flex.data(), nullptr, nullptr);
   EXPECT_LT(alpha, 1) << "the sweep through the vertex is capped";
+  mj_deleteData(d);
+  mj_deleteModel(m);
+}
+
+TEST_F(ContinuousCollisionTest, GjkDistPositiveDistanceAndWarmstart) {
+  constexpr char kXml[] = R"(
+  <mujoco>
+    <worldbody>
+      <geom name="box" type="box" size="0.1 0.2 0.3" pos="0 0 0"/>
+      <geom name="capsule" type="capsule" size="0.05 0.1" pos="0 0 0.6"/>
+      <geom name="cylinder" type="cylinder" size="0.1 0.15" pos="0.5 0 0"/>
+    </worldbody>
+  </mujoco>)";
+  mjModel* m = Load(kXml);
+  mjData* d = mj_makeData(m);
+  mj_forward(m, d);
+
+  mjCCDObj obj1, obj2;
+  mjc_initCCDObj(&obj1, m, d, 0, 0);
+  mjc_initCCDObj(&obj2, m, d, 1, 0);
+
+  mjtNum x1[3], x2[3];
+  mjc_center(x1, &obj1);
+  mjc_center(x2, &obj2);
+
+  // box top is at z = 0.3, capsule bottom is at z = 0.6 - (0.1 + 0.05) = 0.45
+  // -> gap = 0.15
+  mjtNum dist_cold = mjc_gjk(&obj1, &obj2, x1, x2, 10.0, 1e-6, 35);
+  EXPECT_NEAR(dist_cold, 0.15, MjTol(1e-6, 1e-4));
+  EXPECT_NEAR(x1[2], 0.30, MjTol(1e-6, 1e-4));
+  EXPECT_NEAR(x2[2], 0.45, MjTol(1e-6, 1e-4));
+
+  // shift capsule (and its witness point) by dz = -0.02 -> gap = 0.13, query
+  // warm-started
+  obj2.pos[2] -= 0.02;
+  x2[2] -= 0.02;
+  mjtNum dist_warm = mjc_gjk(&obj1, &obj2, x1, x2, 10.0, 1e-6, 35);
+  EXPECT_NEAR(dist_warm, 0.13, MjTol(1e-6, 1e-4));
+  EXPECT_NEAR(x2[2], 0.43, MjTol(1e-6, 1e-4));
+
+  mj_deleteData(d);
+  mj_deleteModel(m);
+}
+
+TEST_F(ContinuousCollisionTest, EllipsoidCylinderAndMeshGeomDist) {
+  constexpr char kXml[] = R"(
+  <mujoco>
+    <asset>
+      <mesh name="tet" vertex="0 0 0  1 0 0  0 1 0  0 0 1"/>
+    </asset>
+    <worldbody>
+      <geom name="cyl" type="cylinder" size="0.2 0.3" pos="0 0 0"/>
+      <geom name="ell" type="ellipsoid" size="0.1 0.2 0.3" pos="1 0 0"/>
+      <geom name="tet" type="mesh" mesh="tet" pos="-2 0 0"/>
+    </worldbody>
+  </mujoco>)";
+  mjModel* m = Load(kXml);
+  mjData* d = mj_makeData(m);
+  mj_forward(m, d);
+
+  EXPECT_TRUE(mjc_GeomSupported(mjGEOM_CYLINDER));
+  EXPECT_TRUE(mjc_GeomSupported(mjGEOM_ELLIPSOID));
+  EXPECT_TRUE(mjc_GeomSupported(mjGEOM_MESH));
+
+  mjtNum n[3];
+  mjtNum p_cyl_top[3] = {0, 0, 0.5};
+  EXPECT_NEAR(GeomDist(m, d, 0, p_cyl_top, n), 0.2, MjTol(1e-6, 1e-4));
+  EXPECT_NEAR(n[2], 1.0, MjTol(1e-5, 1e-3));
+
+  mjtNum p_ell_side[3] = {1.25, 0, 0};
+  EXPECT_NEAR(GeomDist(m, d, 1, p_ell_side, n), 0.15, MjTol(1e-6, 1e-4));
+  EXPECT_NEAR(n[0], 1.0, MjTol(1e-5, 1e-3));
+
+  // point below the z = 0 base of the tetrahedron at (-2, 0, 0)
+  mjtNum p_tet_below[3] = {-1.8, 0.2, -0.3};
+  EXPECT_NEAR(GeomDist(m, d, 2, p_tet_below, n), 0.3, MjTol(1e-6, 1e-4));
+  EXPECT_NEAR(n[2], -1.0, MjTol(1e-5, 1e-3));
+
+  // point inside the tetrahedron
+  mjtNum p_tet_inside[3] = {-1.8, 0.2, 0.1};
+  EXPECT_NEAR(GeomDist(m, d, 2, p_tet_inside, n), -0.1, MjTol(1e-6, 1e-4));
+
+  mj_deleteData(d);
+  mj_deleteModel(m);
+}
+
+TEST_F(ContinuousCollisionTest, AdvanceGeomPairFindsTimeOfImpact) {
+  constexpr char kXml[] = R"(
+  <mujoco>
+    <option timestep="0.01"/>
+    <worldbody>
+      <geom name="ground" type="plane" size="2 2 0.01" pos="0 0 -1"/>
+      <geom name="wall" type="box" size="0.5 0.5 0.02" pos="0 0 0"/>
+      <body name="ball" pos="0 0 0.27">
+        <freejoint/>
+        <geom name="sphere" type="sphere" size="0.05"/>
+      </body>
+      <body name="box1" pos="2 0 0.5">
+        <freejoint/>
+        <geom name="b1" type="box" size="0.05 0.05 0.05"/>
+      </body>
+      <body name="box2" pos="2 0 0.8">
+        <freejoint/>
+        <geom name="b2" type="box" size="0.05 0.05 0.05"/>
+      </body>
+      <body name="rod" pos="-2 0 -0.90">
+        <freejoint/>
+        <geom name="cap" type="capsule" size="0.02 0.2" quat="0.70710678 0 0.70710678 0"/>
+      </body>
+    </worldbody>
+  </mujoco>)";
+  mjModel* m = Load(kXml);
+  mjData* d = mj_makeData(m);
+
+  // initial distance is 0.27 - 0.02 - 0.05 = 0.20 m
+  // downward speed -50 m/s over dt = 0.01 s -> step travel 0.50 m -> TOI around
+  // 0.20 / 0.50 = 0.40
+  d->qvel[2] = -50.0;
+  mj_fwdPosition(m, d);
+
+  mjPreContact con;
+  mjtNum toi = mjc_advanceGeomPair(m, d, 1, 2, 0.0, &con);
+  EXPECT_LT(toi, 1.0);
+  EXPECT_NEAR(toi, 0.392, MjTol(0.02, 0.02));
+  EXPECT_NEAR(con.pos[2], 0.22, MjTol(1e-4, 1e-4));
+  EXPECT_NEAR(con.normal[2], 1.0, MjTol(1e-4, 1e-4));
+  EXPECT_LT(con.dist, 0.0);
+
+  // moving upward (+50 m/s) -> no collision (toi == 1.0)
+  d->qvel[2] = 50.0;
+  mj_fwdPosition(m, d);
+  EXPECT_MJTNUM_EQ(mjc_advanceGeomPair(m, d, 1, 2, 0.0, &con), 1.0);
+
+  // grazing near-miss (skimming 1 cm above the box top at 50 m/s) -> no
+  // collision (toi == 1.0)
+  d->qpos[0] = -0.8;
+  d->qpos[2] = 0.08;
+  d->qvel[0] = 50.0;
+  d->qvel[2] = 0.0;
+  mj_fwdPosition(m, d);
+  EXPECT_MJTNUM_EQ(mjc_advanceGeomPair(m, d, 1, 2, 0.0, &con), 1.0);
+
+  // plane vs. moving sphere (both g1 = plane and g2 = plane)
+  mj_resetData(m, d);
+  d->qpos[2] = -0.75;  // 0.20 m above ground plane at z = -1 (radius 0.05)
+  d->qvel[2] = -50.0;
+  mj_fwdPosition(m, d);
+  EXPECT_NEAR(mjc_advanceGeomPair(m, d, 0, 2, 0.0, &con), 0.392,
+              MjTol(0.02, 0.02));
+  EXPECT_NEAR(con.normal[2], 1.0, MjTol(1e-4, 1e-4));
+  EXPECT_NEAR(mjc_advanceGeomPair(m, d, 2, 0, 0.0, &con), 0.392,
+              MjTol(0.02, 0.02));
+  EXPECT_NEAR(con.normal[2], -1.0, MjTol(1e-4, 1e-4));
+
+  // two moving boxes traveling in the same direction at different speeds
+  // initial distance is (0.8 - 0.05) - (0.5 + 0.05) = 0.20 m;
+  // b1 moves at -10 m/s, b2 catches up at -60 m/s (relative closing 0.50 m)
+  mj_resetData(m, d);
+  d->qvel[8] = -10.0;
+  d->qvel[14] = -60.0;
+  mj_fwdPosition(m, d);
+  EXPECT_LT(mjc_advanceGeomPair(m, d, 3, 4, 0.0, &con), 1.0);
+  EXPECT_NEAR(con.normal[2], 1.0, MjTol(1e-4, 1e-4));
+
+  // rotational motion (dw != 0): horizontal capsule at z = -0.90 rotating about
+  // y-axis so its +x tip swings down into the ground plane at z = -1
+  mj_resetData(m, d);
+  d->qvel[22] = 100.0;  // wy = 100 rad/s -> 1 rad over dt = 0.01 s
+  mj_fwdPosition(m, d);
+  EXPECT_LT(mjc_advanceGeomPair(m, d, 0, 5, 0.0, &con), 1.0);
+  EXPECT_NEAR(con.normal[2], 1.0, MjTol(1e-4, 1e-4));
+
   mj_deleteData(d);
   mj_deleteModel(m);
 }

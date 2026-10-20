@@ -16,12 +16,18 @@
 import contextlib
 import copy
 import dataclasses
+import logging
+import os
 from typing import Any, Callable
 import mujoco
 from mujoco.experimental.studio import endpoints
+from mujoco.experimental.studio import hot_reload
 from mujoco.experimental.studio import messages
+from mujoco.experimental.studio import parser
 from mujoco.experimental.studio import plugin_registry
 import numpy as np
+
+logger = logging.getLogger(__name__)
 
 # Launcher-owned liveness check: returns True while the viewer is still alive.
 # This enables the handle to notice a viewer died without sending ExitEvent.
@@ -39,22 +45,11 @@ ForwardErrorFn = Callable[[], None]
 
 @dataclasses.dataclass(frozen=True)
 class SimInitEvent(messages.Event):
-  """Lifecycle event dispatched once when the ViewerHandle is initialized.
+  """Lifecycle event dispatched locally once when ``ViewerHandle`` initializes.
 
-  The sim-side counterpart of ``viewer_protocol.ViewerInitEvent``: plugins that
-  need the handle, to publish a model or to send messages to the viewer, should
-  handle this event and cache the reference rather than having the launcher
-  hand it to them.
-
-  Like ``ViewerInitEvent``, this carries a live object, so it is dispatched
-  locally to ``sim_plugins`` and never crosses the sim/viewer endpoint.
-
-  Dispatched from ``ViewerHandle.__init__``, so a handler runs before
-  ``launch_passive`` (or any other launcher) has returned. The outbound endpoint
-  queues are already initialized, so handlers may cache the handle and enqueue
-  initial messages via ``event.handle.send_to_viewer(...)``. Raising from a
-  handler aborts the launch: the viewer is shut down and the exception
-  propagates out of the launcher.
+  ``plugin.SimPlugin`` caches ``event.handle`` as ``self.handle`` above
+  ``CRITICAL`` priority, so ``self.handle`` is already set when subclass
+  handlers run (raising aborts the launch and shuts down the viewer).
   """
 
   handle: 'ViewerHandle'
@@ -92,6 +87,11 @@ class ViewerHandle:
     self._forward_error_fn = forward_error_fn
     self.model: mujoco.MjModel | None = None
     self.data: mujoco.MjData | None = None
+    self.model_path: str = ''
+
+    # With hot reload on: the files ``path`` is built from. sync() reloads the
+    # model when one of them changes.
+    self._model_files: hot_reload.FileWatcher | None = None
 
     # Instantiate handlers from user plugins + framework defaults.
     all_sim_plugins: list[Any] = list(sim_plugins or [])
@@ -205,12 +205,26 @@ class ViewerHandle:
       path: The file that produced ``model``, if any; see ``ModelEvent.path``.
       data: The data for ``model``; a fresh ``MjData`` is created when None.
     """
+    path = os.path.abspath(path) if path else ''
     self.model = model
     self.data = mujoco.MjData(model) if data is None else data
+    self.model_path = path
+    self._watch_model(path)
     mujoco.mj_forward(self.model, self.data)
     event = messages.ModelEvent(model=model, path=path)
     self.dispatch(event)
     self.send_to_viewer(event)
+
+  def reload(self) -> None:
+    """Reloads the current model, as the Reload button does."""
+    self.dispatch(messages.LoadModelEvent())
+
+  def _watch_model(self, path: str) -> None:
+    """With model hot reload on, watches the files ``path`` is built from."""
+    self._model_files = None
+    if not path or not hot_reload.watches_model():
+      return
+    self._model_files = hot_reload.watch_files(parser.dependencies(path))
 
   def sync(
       self,
@@ -239,7 +253,8 @@ class ViewerHandle:
 
     Args:
       model: Optional model owned by the caller's loop. If None, keeps
-        simulating the model already on the handle (from ``set_model``).
+        simulating the model already on the handle (from ``set_model`` or
+        ``LoadModelEvent``).
       data: The data for ``model``; ignored when ``model`` is None.
 
     Returns:
@@ -255,19 +270,32 @@ class ViewerHandle:
       model_changed = model is not self.model
       self.model, self.data = model, data
       if model_changed:
+        # Model passed directly to sync() has no file path to reload from.
         assert self.model is not None and self.data is not None
+        self.model_path = ''
+        self._model_files = None
         self._sim_endpoint.send_to_viewer(messages.ModelEvent(model=self.model))
         self._sim_plugins.dispatch(
             messages.PostModelEvent(model=self.model, data=self.data)
         )
 
+    # Apply edited plugin code between steps (no-op unless enabled). After the
+    # caller's model is applied, so a model rebuilt here is returned to them.
+    hot_reload.tick(self._sim_plugins, self)
+    if not hot_reload.watches_model():
+      self._model_files = None
+    elif self._model_files is None and self.model_path:
+      self._watch_model(self.model_path)
+    if self._model_files is not None and self._model_files.poll():
+      self.reload()
+
     # Process incoming events from the viewer.
     for event in events:
-      self._sim_plugins.dispatch(event)
+      self.dispatch(event)
 
     # Process incoming snapshots from the viewer.
     for snapshot in snapshots:
-      self._sim_plugins.dispatch(snapshot)
+      self.dispatch(snapshot)
 
     # Nothing left to step for once a handler has closed the handle.
     if self.model is not None and self._is_running:
@@ -316,6 +344,7 @@ class ViewerHandle:
       # Only needed when ModelEvent is dispatched without calling set_model().
       self.model = event.model
       self.data = mujoco.MjData(event.model)
+      self.model_path = event.path
       mujoco.mj_forward(self.model, self.data)
     assert self.model is not None and self.data is not None
     self.dispatch(
@@ -323,6 +352,25 @@ class ViewerHandle:
             model=self.model, data=self.data, path=event.path
         )
     )
+
+  @messages.handler(priority=messages.Priority.INTERNAL)
+  def _on_load_model(self, event: messages.LoadModelEvent) -> None:
+    # Normalize so relative and absolute paths to a file match.
+    path = os.path.abspath(event.path) if event.path else self.model_path
+    if not path:
+      return
+    if self.model is None:
+      # Record path before loading so Reload can retry a broken initial file.
+      self.model_path = path
+    try:
+      model = parser.load(path)
+    except Exception:  # pylint: disable=broad-exception-caught
+      if path == self.model_path and self._model_files is None:
+        self._watch_model(path)  # So that saving a fix loads it.
+      # A broken file must not take down the running viewer.
+      logger.exception('Loading %r failed; keeping the previous model.', path)
+      return
+    self.set_model(model, path=path)
 
   def _set_state(
       self,
@@ -394,8 +442,9 @@ class ViewerHandle:
 def run_sim_loop(handle: ViewerHandle) -> None:
   """Runs the standard simulation sync loop until the viewer closes.
 
-  Publish a model before calling this (``handle.set_model``), or include a sim
-  plugin that does; until one arrives the viewer shows an empty scene.
+  Publish a model before calling this (``handle.set_model`` or a
+  ``LoadModelEvent``), or include a sim plugin that does; until one arrives the
+  viewer shows an empty scene.
 
   With this loop, all sim-side behavior—stepping, pacing, and edits to
   ``model``, ``data``, or plugin state—belongs in ``sim_plugins`` handling

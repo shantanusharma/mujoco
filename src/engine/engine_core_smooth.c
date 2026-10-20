@@ -549,8 +549,8 @@ static inline void mju_mulMatMat322(mjtNum* C, const mjtNum* A, const mjtNum* B)
 }
 
 
-// compute flex-related quantities
-void mj_flex(const mjModel* m, mjData* d) {
+// compute flex-related quantities, optionally skipping rigid flexes
+void mj_flexSkip(const mjModel* m, mjData* d, int skiprigid) {
   int nv = m->nv;
   int* rowadr = m->flexedge_J_rowadr;
   int* vrowadr = m->flexvert_J_rowadr, *vrownnz = m->flexvert_J_rownnz;
@@ -701,7 +701,7 @@ void mj_flex(const mjModel* m, mjData* d) {
   // compute lengths and Jacobians of edges
   for (int f=0; f < m->nflex; f++) {
     // skip if edges cannot generate forces
-    if (m->flex_rigid[f] || m->flex_interp[f]) {
+    if ((skiprigid && m->flex_rigid[f]) || m->flex_interp[f]) {
       continue;
     }
 
@@ -741,6 +741,9 @@ void mj_flex(const mjModel* m, mjData* d) {
       // no dofs: skip
       if (!NV) {
         continue;
+      }
+      if (NV > m->flexedge_J_rownnz[ebase+e]) {
+        mjERROR("flexedge_J_rownnz too small");
       }
 
       // apply chain rule to compute edge Jacobian
@@ -928,6 +931,12 @@ void mj_flex(const mjModel* m, mjData* d) {
   }
 
   mj_freeStack(d);
+}
+
+
+// compute flex-related quantities
+void mj_flex(const mjModel* m, mjData* d) {
+  mj_flexSkip(m, d, 1);
 }
 
 

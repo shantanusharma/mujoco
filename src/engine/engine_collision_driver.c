@@ -64,8 +64,7 @@ mjfCollision mjCOLLISIONFUNC[mjNGEOMTYPES][mjNGEOMTYPES] = {
 
 
 // return the maximum number of contacts that can be generated between two geoms
-// if has_margin is -1, then the margin is pulled from the model, otherwise if has_margin > 0
-// indicates that the geoms have a positive margin
+// has_margin is ignored
 int mj_maxContact(const mjModel* m, int g1, int g2, int has_margin) {
   int type1 = m->geom_type[g1];
   int type2 = m->geom_type[g2];
@@ -126,34 +125,6 @@ int mj_maxContact(const mjModel* m, int g1, int g2, int has_margin) {
   }
 
   if (mjDISABLED(mjDSBL_NATIVECCD)) {
-    return 5;
-  }
-
-  // check margin from model
-  if (has_margin < 0) {
-    has_margin = 0;
-    if (mjENABLED(mjENBL_OVERRIDE)) {
-      has_margin = m->opt.o_margin > 0.0;
-    } else {
-      int npair = m->npair;
-      int ipair = -1;
-      for (int k=0; k < npair; k++) {
-        if ((m->pair_geom1[k] == g1 && m->pair_geom2[k] == g2) ||
-            (m->pair_geom1[k] == g2 && m->pair_geom2[k] == g1)) {
-            ipair = k;
-            break;
-          }
-        }
-
-      if (ipair > -1) {
-        has_margin = m->pair_margin[ipair] > 0.0;
-      } else {
-        has_margin = m->geom_margin[g1] > 0.0 || m->geom_margin[g2] > 0.0;
-      }
-    }
-  }
-
-  if (has_margin) {
     return 5;
   }
 
@@ -573,6 +544,17 @@ static int pushElemElem(mjData* d, int f1, int e1, int f2, int e2, int group, in
 }
 
 
+// push an elem-elem self-collision pair of flex f onto the arena, unless it is excluded
+static int pushSelfElemElem(const mjModel* m, mjData* d, int f, int e1, int e2, int group,
+                            int npair) {
+  // interpolated flex: skip elements driven by a common grid node
+  if (mjc_ElemSharedNode(m, f, e1, e2)) {
+    return npair;
+  }
+  return pushElemElem(d, f, e1, f, e2, group, npair);
+}
+
+
 // filter candidate collision pair; return 0 if pair should be discarded
 static int filterCollisionPair(const mjModel* m, mjData* d, int g1, int g2, int ipair,
                                int merged, int startadr, int pairadr) {
@@ -840,8 +822,12 @@ void mj_collision(const mjModel* m, mjData* d) {
       // under the ipc flag the IPC step resolves a dim-2 flex's self-contact itself
       if (mjc_ipcOwnsFlexFlex(m, f, f)) continue;
 
-      // active element collisions
-      if (m->flex_selfcollide[f] != mjFLEXSELF_NONE) {
+      // active element collisions; for an interpolated flex with at most 2 cells along every
+      // axis, all cells are neighbors, so every pair is excluded by mjc_ElemSharedNode
+      const int* cellnum = m->flex_cellnum + 3*f;
+      int all_excluded = m->flex_interp[f] && cellnum[0] <= 2 && cellnum[1] <= 2 &&
+                         cellnum[2] <= 2;
+      if (m->flex_selfcollide[f] != mjFLEXSELF_NONE && !all_excluded) {
         int group = flexReducible(m, f) ? ngroup++ : -1;
 
         // element-element: midphase
@@ -865,7 +851,7 @@ void mj_collision(const mjModel* m, mjData* d) {
             if (mj_isElemActive(m, f, e1)) {
               for (int e2=e1+1; e2 < flex_elemnum; e2++) {
                 if (mj_isElemActive(m, f, e2)) {
-                  ncandidate = pushElemElem(d, f, e1, f, e2, group, ncandidate);
+                  ncandidate = pushSelfElemElem(m, d, f, e1, e2, group, ncandidate);
                 }
               }
             }
@@ -1159,15 +1145,26 @@ static int mj_collideTree(const mjModel* m, mjData* d, int bf1, int bf2,
 
     // flex : flex
     else {
-      // both are leaves
-      // box filter applied in mjc_ElemElem, bitmask filter applied earlier
+      // both are leaves: same box filter as mjc_ElemElem (margin and gap ignored in
+      // self-collisions), bitmask filter applied earlier
       if (isleaf1 && isleaf2) {
-        if (bf1 != bf2 || nodeid1 != nodeid2) {
-          npair = pushElemElem(d, f1, nodeid1, f2, nodeid2, group, npair);
+        mjtNum margin = 0;
+        if (bf1 != bf2) {
+          margin = mj_assignMargin(m, m->flex_margin[f1] + m->flex_margin[f2]) +
+                   m->flex_gap[f1] + m->flex_gap[f2];
         }
-        if (mark_active) {
-          d->bvh_active[node1 + bvhadr1] = true;
-          d->bvh_active[node2 + bvhadr2] = true;
+        if (!filterBox(d->flexelem_aabb + 6*(m->flex_elemadr[f1] + nodeid1),
+                       d->flexelem_aabb + 6*(m->flex_elemadr[f2] + nodeid2), margin)) {
+          int npair_old = npair;
+          if (bf1 != bf2) {
+            npair = pushElemElem(d, f1, nodeid1, f2, nodeid2, group, npair);
+          } else if (nodeid1 != nodeid2) {
+            npair = pushSelfElemElem(m, d, f1, nodeid1, nodeid2, group, npair);
+          }
+          if (mark_active && npair > npair_old) {
+            d->bvh_active[node1 + bvhadr1] = true;
+            d->bvh_active[node2 + bvhadr2] = true;
+          }
         }
         continue;
       }
@@ -2353,7 +2350,7 @@ static int mj_collideFlexSAPPairs(const mjModel* m, mjData* d, int f, int group,
   for (int i=0; i < nsappair; i++) {
     int e1 = elid[sappair[i].hi];
     int e2 = elid[sappair[i].lo];
-    npair = pushElemElem(d, f, e1, f, e2, group, npair);
+    npair = pushSelfElemElem(m, d, f, e1, e2, group, npair);
   }
 
   mj_freeStack(d);
