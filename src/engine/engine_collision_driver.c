@@ -248,22 +248,91 @@ static int filterSphere(const mjtNum pos1[3], const mjtNum pos2[3], mjtNum bound
 }
 
 
-// filter contact based on bounding sphere test
+// return step sweep distance if geom g moves faster than its minimum half-thickness
+static mjtNum geomFastSweep(const mjModel* m, const mjData* d, int g,
+                            mjtNum dx[3], mjtNum dw[3]) {
+  if (dx) mju_zero3(dx);
+  if (dw) mju_zero3(dw);
+  // TODO(kylebayes): replace m->opt.timestep >= 0 with an enable flag
+  if (g < 0 || m->opt.timestep >= 0 || mjDISABLED(mjDSBL_NATIVECCD) ||
+      m->geom_type[g] == mjGEOM_PLANE || !mjc_GeomSupported(m->geom_type[g])) {
+    return 0;
+  }
+  const mjtNum* size = m->geom_aabb + 6*g + 3;
+  mjtNum dx_copy[3], dw_copy[3];
+  mjtNum s = mjc_geomStepMotion(m, d, g, m->opt.timestep, dx_copy, dw_copy);
+
+  // if the geom is moving slower than its minimum half-thickness, we do not need to consider it
+  // for continuous collision detection
+  if (s < mju_min(size[0], mju_min(size[1], size[2]))) {
+    return 0;
+  }
+
+  if (dx) mju_copy3(dx, dx_copy);
+  if (dw) mju_copy3(dw, dw_copy);
+  return s;
+}
+
+
+// return 1 if body b has any geom moving faster than its minimum half-thickness
+static int bodyHasFastGeom(const mjModel* m, const mjData* d, int b) {
+  // TODO(kylebayes): replace m->opt.timestep >= 0 with an enable flag
+  if (b <= 0 || b >= m->nbody || m->opt.timestep >= 0 || mjDISABLED(mjDSBL_NATIVECCD)) {
+    return 0;
+  }
+  int adr = m->body_geomadr[b];
+  int num = m->body_geomnum[b];
+  for (int i = 0; i < num; i++) {
+    if (geomFastSweep(m, d, adr + i, NULL, NULL) > 0) {
+      return 1;
+    }
+  }
+  return 0;
+}
+
+
+// filter contact based on bounding sphere test (swept over step for fast geoms)
 static int mj_filterSphere(const mjModel* m, mjData* d, int g1, int g2, mjtNum margin) {
+  mjtNum dx1[3], dx2[3];
+  mjtNum s1 = geomFastSweep(m, d, g1, dx1, NULL);
+  mjtNum s2 = geomFastSweep(m, d, g2, dx2, NULL);
+
   // neither geom is a plane
   if (m->geom_rbound[g1] > 0 && m->geom_rbound[g2] > 0) {
-    return filterSphere(d->geom_xpos + 3*g1, d->geom_xpos + 3*g2,
-                        m->geom_rbound[g1] + m->geom_rbound[g2] + margin);
+    mjtNum bound = m->geom_rbound[g1] + m->geom_rbound[g2] + margin;
+    if (s1 == 0 && s2 == 0) {
+      return filterSphere(d->geom_xpos + 3*g1, d->geom_xpos + 3*g2, bound);
+    }
+
+    // find closest approach time tau in [0, 1] (fraction of timestep) and check against
+    // combined radius
+    mjtNum p[3], v[3], closest[3];
+    mju_sub3(p, d->geom_xpos + 3*g2, d->geom_xpos + 3*g1);
+    mju_sub3(v, dx2, dx1);
+    mjtNum vv = mju_dot3(v, v);
+    mjtNum tau = (vv > mjMINVAL) ? mju_clip(-mju_dot3(p, v) / vv, 0.0, 1.0) : 0.0;
+    mji_addScl3(closest, p, v, tau);
+    return mju_dot3(closest, closest) > bound * bound;
   }
 
   // one geom is a plane
-  if (m->geom_type[g1] == mjGEOM_PLANE && m->geom_rbound[g2] > 0
-      && planeGeomDist(m, d, g1, g2) > margin + m->geom_rbound[g2]) {
-    return 1;
+  if (m->geom_type[g1] == mjGEOM_PLANE && m->geom_rbound[g2] > 0) {
+    mjtNum dist0 = planeGeomDist(m, d, g1, g2);
+    const mjtNum* mat1 = d->geom_xmat + 9*g1;
+    mjtNum n1[3] = {mat1[2], mat1[5], mat1[8]};
+    mjtNum dist_min = mju_min(dist0, dist0 + mju_dot3(n1, dx2));
+    if (dist_min > margin + m->geom_rbound[g2]) {
+      return 1;
+    }
   }
-  if (m->geom_type[g2] == mjGEOM_PLANE && m->geom_rbound[g1] > 0
-      && planeGeomDist(m, d, g2, g1) > margin + m->geom_rbound[g1]) {
-    return 1;
+  if (m->geom_type[g2] == mjGEOM_PLANE && m->geom_rbound[g1] > 0) {
+    mjtNum dist0 = planeGeomDist(m, d, g2, g1);
+    const mjtNum* mat2 = d->geom_xmat + 9*g2;
+    mjtNum n2[3] = {mat2[2], mat2[5], mat2[8]};
+    mjtNum dist_min = mju_min(dist0, dist0 + mju_dot3(n2, dx1));
+    if (dist_min > margin + m->geom_rbound[g1]) {
+      return 1;
+    }
   }
   return 0;
 }
@@ -712,7 +781,8 @@ void mj_collision(const mjModel* m, mjData* d) {
     }
 
     // process bodyflex pair: midphase
-    else if (!mjDISABLED(mjDSBL_MIDPHASE) && bvh1 >= 0 && bvh2 >= 0) {
+    else if (!mjDISABLED(mjDSBL_MIDPHASE) && bvh1 >= 0 && bvh2 >= 0 &&
+             !(isbody1 && isbody2 && (bodyHasFastGeom(m, d, bf1) || bodyHasFastGeom(m, d, bf2)))) {
       // filter groups for reducible flexes: one per geom for body:flex, one for flex:flex
       int group = -1;
       if (isbody1 && !isbody2) {
@@ -1289,16 +1359,23 @@ static void makeAAMM(const mjModel* m, mjData* d,
       mjtNum axis[9];
       mji_transpose3(axis, xmat);
       mjtNum r_half = m->geom_rbound[geom];
+      mjtNum dx[3], dw[3];
+      geomFastSweep(m, d, geom, dx, dw);
+      mjtNum s_rot = mju_norm3(dw) * r_half;
 
       for (int j=0; j < 3; j++) {
         const mjtNum* frame_j = frame + 3*j;
         mjtNum aabb_cen = mju_dot3(pos, frame_j);
         mjtNum aabb_half = mju_abs(size[0] * mju_dot3(axis + 0, frame_j))
                          + mju_abs(size[1] * mju_dot3(axis + 3, frame_j))
-                         + mju_abs(size[2] * mju_dot3(axis + 6, frame_j));
+                         + mju_abs(size[2] * mju_dot3(axis + 6, frame_j))
+                         + s_rot;
         mjtNum r_cen = mju_dot3(xpos, frame_j);
-        _aamm[j + 0] = mju_max(r_cen - r_half, aabb_cen - aabb_half) - margin;
-        _aamm[j + 3] = mju_min(r_cen + r_half, aabb_cen + aabb_half) + margin;
+        mjtNum lo = mju_max(r_cen - r_half, aabb_cen - aabb_half);
+        mjtNum hi = mju_min(r_cen + r_half, aabb_cen + aabb_half);
+        mjtNum d_proj = mju_dot3(dx, frame_j);
+        _aamm[j + 0] = lo + mju_min(0, d_proj) - margin;
+        _aamm[j + 3] = hi + mju_max(0, d_proj) + margin;
       }
 
       // update body aamm
@@ -1741,105 +1818,7 @@ static int mj_broadphase(const mjModel* m, mjData* d, mjPacked32* bfpair, int ma
 }
 
 
-//----------------------------- narrow-phase collision detection -----------------------------------
-
-// compute contact condim, solref, solimp, friction, adhesion
-static void mj_contactParam(const mjModel* m, int* condim,
-                            mjtNum* solref, mjtNum* solimp, mjtNum* friction,
-                            mjtNum* adhesion, int g1, int g2, int f1, int f2) {
-  mjtNum fri[3];
-
-  // get parameters from geom1 or flex1
-  int priority1 =           (f1 < 0) ? m->geom_priority[g1]     : m->flex_priority[f1];
-  int condim1 =             (f1 < 0) ? m->geom_condim[g1]       : m->flex_condim[f1];
-  mjtNum solmix1 =          (f1 < 0) ? m->geom_solmix[g1]       : m->flex_solmix[f1];
-  const mjtNum* solref1 =   (f1 < 0) ? m->geom_solref+g1*mjNREF : m->flex_solref+f1*mjNREF;
-  const mjtNum* solimp1 =   (f1 < 0) ? m->geom_solimp+g1*mjNIMP : m->flex_solimp+f1*mjNIMP;
-  const mjtNum* friction1 = (f1 < 0) ? m->geom_friction+g1*3    : m->flex_friction+f1*3;
-  mjtNum adhesion1 =        (f1 < 0) ? m->geom_adhesion[g1]     : 0;
-
-  // get parameters from geom2 or flex2
-  int priority2 =           (f2 < 0) ? m->geom_priority[g2]     : m->flex_priority[f2];
-  int condim2 =             (f2 < 0) ? m->geom_condim[g2]       : m->flex_condim[f2];
-  mjtNum solmix2 =          (f2 < 0) ? m->geom_solmix[g2]       : m->flex_solmix[f2];
-  const mjtNum* solref2 =   (f2 < 0) ? m->geom_solref+g2*mjNREF : m->flex_solref+f2*mjNREF;
-  const mjtNum* solimp2 =   (f2 < 0) ? m->geom_solimp+g2*mjNIMP : m->flex_solimp+f2*mjNIMP;
-  const mjtNum* friction2 = (f2 < 0) ? m->geom_friction+g2*3    : m->flex_friction+f2*3;
-  mjtNum adhesion2 =        (f2 < 0) ? m->geom_adhesion[g2]     : 0;
-
-  // adhesion: each surface contributes its own attraction
-  *adhesion = adhesion1 + adhesion2;
-
-  // different priority: copy from item with higher priority
-  if (priority1 > priority2) {
-    *condim = condim1;
-    mju_copy(solref, solref1, mjNREF);
-    mju_copy(solimp, solimp1, mjNIMP);
-    mju_copy(fri, friction1, 3);
-    *adhesion = adhesion1;
-  }
-  else if (priority1 < priority2) {
-    *condim = condim2;
-    mju_copy(solref, solref2, mjNREF);
-    mju_copy(solimp, solimp2, mjNIMP);
-    mju_copy(fri, friction2, 3);
-    *adhesion = adhesion2;
-  }
-
-  // same priority
-  else {
-    // condim: max
-    *condim = mjMAX(condim1, condim2);
-
-    // compute solver mix factor
-    mjtNum mix;
-    if (solmix1 >= mjMINVAL && solmix2 >= mjMINVAL) {
-      mix = solmix1 / (solmix1 + solmix2);
-    } else if (solmix1 < mjMINVAL && solmix2 < mjMINVAL) {
-      mix = 0.5;
-    } else if (solmix1 < mjMINVAL) {
-      mix = 0.0;
-    } else {
-      mix = 1.0;
-    }
-
-    // reference standard: mix
-    if (solref1[0] > 0 && solref2[0] > 0) {
-      for (int i=0; i < mjNREF; i++) {
-        solref[i] = mix*solref1[i] + (1-mix)*solref2[i];
-      }
-    }
-
-    // reference direct: min
-    else {
-      for (int i=0; i < mjNREF; i++) {
-        solref[i] = mju_min(solref1[i], solref2[i]);
-      }
-    }
-
-    // impedance: mix
-    for (int i=0; i < mjNIMP; i++) {
-      solimp[i] = mix*solimp1[i] + (1-mix)*solimp2[i];
-    }
-
-    // friction: max
-    for (int i=0; i < 3; i++) {
-      fri[i] = mju_max(friction1[i], friction2[i]);
-    }
-  }
-
-  // unpack 5D friction
-  friction[0] = fri[0];
-  friction[1] = fri[0];
-  friction[2] = fri[1];
-  friction[3] = fri[2];
-  friction[4] = fri[2];
-
-  // SHOULD NOT OCCUR
-  if (*condim > 6 || *condim < 1) {
-    mjERROR("Invalid condim value: %d", *condim);
-  }
-}
+//----------------------------- narrow-phase collision detection ----------------------------------
 
 
 // set contact parameters
@@ -1966,6 +1945,13 @@ static void collisionTask(const mjModel* m, mjData* d, void* arg, int thread_id,
         mjtNum margin = getMargin(m, g1, g2, ipair);
         mjtNum gap = getGap(m, g1, g2, ipair);
         ncon[i] = collision_func(m, d, conbuffer + conpos, g1, g2, margin + gap);
+        if (ncon[i] == 0 && !mjDISABLED(mjDSBL_NATIVECCD)) {
+          if (geomFastSweep(m, d, g1, NULL, NULL) > 0 ||
+              geomFastSweep(m, d, g2, NULL, NULL) > 0) {
+            mjc_advanceGeomPair(m, d, g1, g2, margin + gap, conbuffer + conpos, &ncon[i],
+                                epabuffer + thread_id * conargs->ccd_size);
+          }
+        }
         break;
       }
 
