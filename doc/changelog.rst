@@ -2,6 +2,37 @@
 Changelog
 =========
 
+Upcoming Version (not yet released)
+-----------------------------------
+
+Engine
+^^^^^^
+- Contacts with flex elements now distribute the contact to the element vertices with the barycentric coordinates of the
+  point on the element closest to the contact. Previously the vertex weights were inversely proportional to the
+  distances from the contact, which do not interpolate the contact point: the contact Jacobian measured the velocity of
+  a different material point, and the contact force exerted a spurious torque on the element. This changes the
+  simulation of models with flex contacts.
+- Fixed contact Jacobians of quadratic flexes, which dropped nodes with negative basis weights.
+- Interpolated flexes (**trilinear** or **quadratic** :ref:`dofs<body-flexcomp-dof>`) now support
+  :ref:`passive<flex-contact-passive>` contact.
+- Improved numerical stability of sphere and cylinder :ref:`spatial tendon<tendon-spatial>` :ref:`geom<spatial-geom>`
+  wrapping at wrap onset. Thanks to :github:user:`M-Colley` for reporting and analyzing the issue in
+  :doc:`MJWarp <mjwarp/index>` issue `1772 <https://github.com/google-deepmind/mujoco_warp/issues/1772>`__.
+- Flex integration changes:
+
+  - Flex :ref:`edge damping<flex-edge-damping>` is now integrated explicitly under ``implicit`` and ``implicitfast``
+    (previously it also damped rigid translation).
+  - 1D rod bending :ref:`elasticity<flex-elasticity>` (``dim="1"`` with positive ``young``) is no longer supported under
+    ``implicit`` and ``implicitfast``, matching 2D and 3D flex elasticity. Migrate to ``integrator="discrete"`` for
+    implicit integration, or ``integrator="Euler"`` with a small timestep for explicit integration.
+  - Flex :ref:`edge stiffness<flex-edge-stiffness>` and :ref:`damping<flex-edge-damping>` are no longer supported under
+    ``integrator="discrete"`` (where they were integrated explicitly rather than in the effective metric). Migrate to
+    :ref:`elasticity<flex-elasticity>` (or :ref:`edge equality<flexcomp-edge-equality>`), or use ``Euler``/``RK4``/``implicitfast``.
+
+Python bindings
+^^^^^^^^^^^^^^^
+- Removed support for Python 3.10, now that it's `deprecated upstream <https://devguide.python.org/versions>`__.
+
 Version 3.17.0 (October 22, 2026)
 ---------------------------------
 

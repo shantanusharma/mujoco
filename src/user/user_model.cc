@@ -3729,8 +3729,9 @@ void mjCModel::CopyObjects(mjModel* m) {
       mjuu_copyvec(m->flex_node + 3 * node_adr, pfl->node_.data(), 3 * pfl->nnode);
     }
 
-    // copy vert0
+    // copy vert0 and vertcell
     mjuu_copyvec(m->flex_vert0 + 3 * vert_adr, pfl->vert0_.data(), 3 * pfl->nvert);
+    memcpy(m->flex_vertcell + vert_adr, pfl->vertcell_.data(), pfl->nvert * sizeof(int));
 
     // copy node0
     mjuu_copyvec(m->flex_node0 + 3 * node_adr, pfl->node0_.data(), 3 * pfl->nnode);
@@ -3756,11 +3757,11 @@ void mjCModel::CopyObjects(mjModel* m) {
     // set interpolation type: positive = volumetric, negative = shell mode
     m->flex_interp[i] = pfl->spec.elastic2d ? -pfl->spec.order : pfl->spec.order;
 
-    if (m->flex_passive[i] && (m->flex_rigid[i] || m->flex_interp[i] || m->flex_dim[i] < 2)) {
+    if (m->flex_passive[i] && (m->flex_rigid[i] || m->flex_dim[i] < 2)) {
       AddWarning("flex '" +
                      pfl->name +
-                     "' has passive contact, which is not supported for rigid, "
-                     "interpolated or 1D flexes: attribute ignored",
+                     "' has passive contact, which is not supported for rigid "
+                     "or 1D flexes: attribute ignored",
                  pfl);
     }
 
