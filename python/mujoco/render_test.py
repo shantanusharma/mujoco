@@ -16,12 +16,20 @@
 
 import os
 import struct
+import subprocess
+import sys
+from unittest import mock
 import zlib
 
 from absl import flags
 from absl.testing import absltest
 import mujoco
 import numpy as np
+
+_EGL_ENABLED = (
+    getattr(getattr(mujoco, 'GLContext', None), '__module__', None)
+    == 'mujoco.egl'
+)
 
 
 def _png(pixels: np.ndarray) -> bytes:
@@ -310,6 +318,78 @@ class MuJoCoRenderTest(absltest.TestCase):
     rect_repr = repr(rect)
     self.assertIn('MjrRect', rect_repr)
     self.assertIn('left: 1', rect_repr)
+
+
+@absltest.skipUnless(_EGL_ENABLED, 'MuJoCo is not using the EGL backend')
+class EglDisplayTest(absltest.TestCase):
+  """Tests for the lifetime of the shared EGL display."""
+
+  def setUp(self):
+    super().setUp()
+    self.egl = sys.modules['mujoco.egl']
+
+  def test_free_after_display_terminated(self):
+    gl = mujoco.GLContext(64, 64)
+    gl.make_current()
+    # This is what the atexit hook runs before contexts still alive are freed.
+    self.egl._terminate_display()  # pylint: disable=protected-access
+    self.assertIsNone(self.egl.EGL_DISPLAY)
+    gl.free()
+
+    # New contexts initialize the display again.
+    gl = mujoco.GLContext(64, 64)
+    gl.make_current()
+    gl.free()
+
+  def test_renderer_close_after_display_terminated(self):
+    model = mujoco.MjModel.from_xml_string('<mujoco/>')
+    renderer = mujoco.Renderer(model, 64, 64)
+    self.egl._terminate_display()  # pylint: disable=protected-access
+    self.assertIsNone(self.egl.EGL_DISPLAY)
+    renderer.close()
+
+    with mujoco.Renderer(model, 64, 64):
+      self.assertIsNotNone(self.egl.EGL_DISPLAY)
+
+  def test_free_non_current_context_preserves_current(self):
+    gl1 = mujoco.GLContext(64, 64)
+    gl2 = mujoco.GLContext(64, 64)
+    try:
+      gl2.make_current()
+      expected_addr = self.egl.EGL.eglGetCurrentContext().address
+      gl1.free()
+      current = self.egl.EGL.eglGetCurrentContext()
+      self.assertTrue(bool(current))
+      self.assertEqual(current.address, expected_addr)
+    finally:
+      gl1.free()
+      gl2.free()
+
+  def test_failed_display_init_is_retried(self):
+    no_display = mock.patch.object(
+        self.egl,
+        'create_initialized_egl_device_display',
+        return_value=self.egl.EGL.EGL_NO_DISPLAY,
+    )
+    with mock.patch.object(self.egl, 'EGL_DISPLAY', None):
+      with no_display:
+        for _ in range(2):
+          with self.assertRaises(ImportError):
+            mujoco.GLContext(64, 64)
+          self.assertIsNone(self.egl.EGL_DISPLAY)
+
+      # Once a display is available, initialization succeeds.
+      gl = mujoco.GLContext(64, 64)
+      gl.make_current()
+      gl.free()
+
+  @absltest.skipIf(not sys.executable, 'needs a Python interpreter binary')
+  def test_no_error_at_exit_with_live_context(self):
+    code = 'import mujoco; gl = mujoco.GLContext(64, 64); gl.make_current()'
+    result = subprocess.run(
+        [sys.executable, '-c', code], capture_output=True, text=True, check=True
+    )
+    self.assertNotIn('Exception ignored', result.stderr)
 
 
 if __name__ == '__main__':

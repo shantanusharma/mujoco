@@ -56,8 +56,13 @@ cc_library(
     copts = [
         "-I" + MJ_ROOT + "/src",
         "-Wshadow",
+        "-fvisibility=hidden",
     ],
-    cxxopts = ["-std=c++20"],
+    cxxopts = [
+        "-fvisibility-inlines-hidden",
+        "-std=c++20",
+    ],
+    linkstatic = True,
     local_defines = [
         "MUJOCO_DLL_EXPORTS",
         "_GNU_SOURCE",
@@ -101,8 +106,13 @@ cc_library(
     copts = [
         "-I" + MJ_ROOT + "/src",
         "-Wshadow",
+        "-fvisibility=hidden",
     ],
-    cxxopts = ["-std=c++20"],
+    cxxopts = [
+        "-fvisibility-inlines-hidden",
+        "-std=c++20",
+    ],
+    linkstatic = True,
     local_defines = [
         "MUJOCO_DLL_EXPORTS",
         "_GNU_SOURCE",
@@ -130,8 +140,13 @@ cc_library(
     copts = [
         "-I" + MJ_ROOT + "/src",
         "-Wshadow",
+        "-fvisibility=hidden",
     ],
-    cxxopts = ["-std=c++20"],
+    cxxopts = [
+        "-fvisibility-inlines-hidden",
+        "-std=c++20",
+    ],
+    linkstatic = True,
     local_defines = [
         "MUJOCO_DLL_EXPORTS",
         "_GNU_SOURCE",
@@ -144,6 +159,7 @@ cc_library(
         ":engine_forward",
         ":engine_io",
         ":engine_memory",
+        ":engine_sleep",
         ":engine_util_blas",
         ":engine_util_errmem",
         ":engine_util_misc",
@@ -170,8 +186,13 @@ cc_library(
     copts = [
         "-I" + MJ_ROOT + "/src",
         "-Wshadow",
+        "-fvisibility=hidden",
     ],
-    cxxopts = ["-std=c++20"],
+    cxxopts = [
+        "-fvisibility-inlines-hidden",
+        "-std=c++20",
+    ],
+    linkstatic = True,
     local_defines = [
         "MUJOCO_DLL_EXPORTS",
         "_GNU_SOURCE",
@@ -200,6 +221,7 @@ cc_library(
         ":engine_util_misc",
         ":engine_util_solve",
         ":engine_util_sparse",
+        ":engine_util_spatial",
         "//:libmujoco_hdrs",
     ],
 )
@@ -212,8 +234,13 @@ cc_library(
     copts = [
         "-I" + MJ_ROOT + "/src",
         "-Wshadow",
+        "-fvisibility=hidden",
     ],
-    cxxopts = ["-std=c++20"],
+    cxxopts = [
+        "-fvisibility-inlines-hidden",
+        "-std=c++20",
+    ],
+    linkstatic = True,
     local_defines = [
         "MUJOCO_DLL_EXPORTS",
         "_GNU_SOURCE",
@@ -251,8 +278,13 @@ cc_library(
     copts = [
         "-I" + MJ_ROOT + "/src",
         "-Wshadow",
+        "-fvisibility=hidden",
     ],
-    cxxopts = ["-std=c++20"],
+    cxxopts = [
+        "-fvisibility-inlines-hidden",
+        "-std=c++20",
+    ],
+    linkstatic = True,
     local_defines = [
         "MUJOCO_DLL_EXPORTS",
         "_GNU_SOURCE",
@@ -285,8 +317,13 @@ cc_library(
     copts = [
         "-I" + MJ_ROOT + "/src",
         "-Wshadow",
+        "-fvisibility=hidden",
     ],
-    cxxopts = ["-std=c++20"],
+    cxxopts = [
+        "-fvisibility-inlines-hidden",
+        "-std=c++20",
+    ],
+    linkstatic = True,
     local_defines = [
         "MUJOCO_DLL_EXPORTS",
         "_GNU_SOURCE",
@@ -318,8 +355,13 @@ cc_library(
     copts = [
         "-I" + MJ_ROOT + "/src",
         "-Wshadow",
+        "-fvisibility=hidden",
     ],
-    cxxopts = ["-std=c++20"],
+    cxxopts = [
+        "-fvisibility-inlines-hidden",
+        "-std=c++20",
+    ],
+    linkstatic = True,
     local_defines = [
         "MUJOCO_DLL_EXPORTS",
         "_GNU_SOURCE",
@@ -336,8 +378,13 @@ cc_library(
     copts = [
         "-I" + MJ_ROOT + "/src",
         "-Wshadow",
+        "-fvisibility=hidden",
     ],
-    cxxopts = ["-std=c++20"],
+    cxxopts = [
+        "-fvisibility-inlines-hidden",
+        "-std=c++20",
+    ],
+    linkstatic = True,
     local_defines = [
         "MUJOCO_DLL_EXPORTS",
         "_GNU_SOURCE",
@@ -361,8 +408,13 @@ cc_library(
     copts = [
         "-I" + MJ_ROOT + "/src",
         "-Wshadow",
+        "-fvisibility=hidden",
     ],
-    cxxopts = ["-std=c++20"],
+    cxxopts = [
+        "-fvisibility-inlines-hidden",
+        "-std=c++20",
+    ],
+    linkstatic = True,
     local_defines = [
         "MUJOCO_DLL_EXPORTS",
         "_GNU_SOURCE",
@@ -390,8 +442,13 @@ cc_library(
     copts = [
         "-I" + MJ_ROOT + "/src",
         "-Wshadow",
+        "-fvisibility=hidden",
     ],
-    cxxopts = ["-std=c++20"],
+    cxxopts = [
+        "-fvisibility-inlines-hidden",
+        "-std=c++20",
+    ],
+    linkstatic = True,
     local_defines = [
         "MUJOCO_DLL_EXPORTS",
         "_GNU_SOURCE",
@@ -431,8 +488,13 @@ cc_library(
     copts = [
         "-I" + MJ_ROOT + "/src",
         "-Wshadow",
+        "-fvisibility=hidden",
     ],
-    cxxopts = ["-std=c++20"],
+    cxxopts = [
+        "-fvisibility-inlines-hidden",
+        "-std=c++20",
+    ],
+    linkstatic = True,
     local_defines = [
         "MUJOCO_DLL_EXPORTS",
         "_GNU_SOURCE",
@@ -459,8 +521,13 @@ cc_library(
     copts = [
         "-I" + MJ_ROOT + "/src",
         "-Wshadow",
+        "-fvisibility=hidden",
     ],
-    cxxopts = ["-std=c++20"],
+    cxxopts = [
+        "-fvisibility-inlines-hidden",
+        "-std=c++20",
+    ],
+    linkstatic = True,
     local_defines = [
         "MUJOCO_DLL_EXPORTS",
         "_GNU_SOURCE",
@@ -488,8 +555,13 @@ cc_library(
     copts = [
         "-I" + MJ_ROOT + "/src",
         "-Wshadow",
+        "-fvisibility=hidden",
     ],
-    cxxopts = ["-std=c++20"],
+    cxxopts = [
+        "-fvisibility-inlines-hidden",
+        "-std=c++20",
+    ],
+    linkstatic = True,
     local_defines = [
         "MUJOCO_DLL_EXPORTS",
         "_GNU_SOURCE",
@@ -512,8 +584,13 @@ cc_library(
     copts = [
         "-I" + MJ_ROOT + "/src",
         "-Wshadow",
+        "-fvisibility=hidden",
     ],
-    cxxopts = ["-std=c++20"],
+    cxxopts = [
+        "-fvisibility-inlines-hidden",
+        "-std=c++20",
+    ],
+    linkstatic = True,
     local_defines = [
         "MUJOCO_DLL_EXPORTS",
         "_GNU_SOURCE",
@@ -538,8 +615,13 @@ cc_library(
     copts = [
         "-I" + MJ_ROOT + "/src",
         "-Wshadow",
+        "-fvisibility=hidden",
     ],
-    cxxopts = ["-std=c++20"],
+    cxxopts = [
+        "-fvisibility-inlines-hidden",
+        "-std=c++20",
+    ],
+    linkstatic = True,
     local_defines = [
         "MUJOCO_DLL_EXPORTS",
         "_GNU_SOURCE",
@@ -573,8 +655,13 @@ cc_library(
     copts = [
         "-I" + MJ_ROOT + "/src",
         "-Wshadow",
+        "-fvisibility=hidden",
     ],
-    cxxopts = ["-std=c++20"],
+    cxxopts = [
+        "-fvisibility-inlines-hidden",
+        "-std=c++20",
+    ],
+    linkstatic = True,
     local_defines = [
         "MUJOCO_DLL_EXPORTS",
         "_GNU_SOURCE",
@@ -589,8 +676,13 @@ cc_library(
     copts = [
         "-I" + MJ_ROOT + "/src",
         "-Wshadow",
+        "-fvisibility=hidden",
     ],
-    cxxopts = ["-std=c++20"],
+    cxxopts = [
+        "-fvisibility-inlines-hidden",
+        "-std=c++20",
+    ],
+    linkstatic = True,
     local_defines = [
         "MUJOCO_DLL_EXPORTS",
         "_GNU_SOURCE",
@@ -622,8 +714,13 @@ cc_library(
     copts = [
         "-I" + MJ_ROOT + "/src",
         "-Wshadow",
+        "-fvisibility=hidden",
     ],
-    cxxopts = ["-std=c++20"],
+    cxxopts = [
+        "-fvisibility-inlines-hidden",
+        "-std=c++20",
+    ],
+    linkstatic = True,
     local_defines = [
         "MUJOCO_DLL_EXPORTS",
         "_GNU_SOURCE",
@@ -654,8 +751,13 @@ cc_library(
     copts = [
         "-I" + MJ_ROOT + "/src",
         "-Wshadow",
+        "-fvisibility=hidden",
     ],
-    cxxopts = ["-std=c++20"],
+    cxxopts = [
+        "-fvisibility-inlines-hidden",
+        "-std=c++20",
+    ],
+    linkstatic = True,
     local_defines = [
         "MUJOCO_DLL_EXPORTS",
         "_GNU_SOURCE",
@@ -678,8 +780,13 @@ cc_library(
     copts = [
         "-I" + MJ_ROOT + "/src",
         "-Wshadow",
+        "-fvisibility=hidden",
     ],
-    cxxopts = ["-std=c++20"],
+    cxxopts = [
+        "-fvisibility-inlines-hidden",
+        "-std=c++20",
+    ],
+    linkstatic = True,
     local_defines = [
         "MUJOCO_DLL_EXPORTS",
         "_GNU_SOURCE",
@@ -714,8 +821,13 @@ cc_library(
     copts = [
         "-I" + MJ_ROOT + "/src",
         "-Wshadow",
+        "-fvisibility=hidden",
     ],
-    cxxopts = ["-std=c++20"],
+    cxxopts = [
+        "-fvisibility-inlines-hidden",
+        "-std=c++20",
+    ],
+    linkstatic = True,
     local_defines = [
         "MUJOCO_DLL_EXPORTS",
         "_GNU_SOURCE",
@@ -747,8 +859,13 @@ cc_library(
     copts = [
         "-I" + MJ_ROOT + "/src",
         "-Wshadow",
+        "-fvisibility=hidden",
     ],
-    cxxopts = ["-std=c++20"],
+    cxxopts = [
+        "-fvisibility-inlines-hidden",
+        "-std=c++20",
+    ],
+    linkstatic = True,
     local_defines = [
         "MUJOCO_DLL_EXPORTS",
         "_GNU_SOURCE",
@@ -770,8 +887,13 @@ cc_library(
     copts = [
         "-I" + MJ_ROOT + "/src",
         "-Wshadow",
+        "-fvisibility=hidden",
     ],
-    cxxopts = ["-std=c++20"],
+    cxxopts = [
+        "-fvisibility-inlines-hidden",
+        "-std=c++20",
+    ],
+    linkstatic = True,
     local_defines = [
         "MUJOCO_DLL_EXPORTS",
         "_GNU_SOURCE",
@@ -789,8 +911,13 @@ cc_library(
     copts = [
         "-I" + MJ_ROOT + "/src",
         "-Wshadow",
+        "-fvisibility=hidden",
     ],
-    cxxopts = ["-std=c++20"],
+    cxxopts = [
+        "-fvisibility-inlines-hidden",
+        "-std=c++20",
+    ],
+    linkstatic = True,
     local_defines = [
         "MUJOCO_DLL_EXPORTS",
         "_GNU_SOURCE",
@@ -810,8 +937,13 @@ cc_library(
     copts = [
         "-I" + MJ_ROOT + "/src",
         "-Wshadow",
+        "-fvisibility=hidden",
     ],
-    cxxopts = ["-std=c++20"],
+    cxxopts = [
+        "-fvisibility-inlines-hidden",
+        "-std=c++20",
+    ],
+    linkstatic = True,
     local_defines = [
         "MUJOCO_DLL_EXPORTS",
         "_GNU_SOURCE",
@@ -839,8 +971,13 @@ cc_library(
     copts = [
         "-I" + MJ_ROOT + "/src",
         "-Wshadow",
+        "-fvisibility=hidden",
     ],
-    cxxopts = ["-std=c++20"],
+    cxxopts = [
+        "-fvisibility-inlines-hidden",
+        "-std=c++20",
+    ],
+    linkstatic = True,
     local_defines = [
         "MUJOCO_DLL_EXPORTS",
         "_GNU_SOURCE",
@@ -859,8 +996,13 @@ cc_library(
     copts = [
         "-I" + MJ_ROOT + "/src",
         "-Wshadow",
+        "-fvisibility=hidden",
     ],
-    cxxopts = ["-std=c++20"],
+    cxxopts = [
+        "-fvisibility-inlines-hidden",
+        "-std=c++20",
+    ],
+    linkstatic = True,
     local_defines = [
         "MUJOCO_DLL_EXPORTS",
         "_GNU_SOURCE",
@@ -880,8 +1022,13 @@ cc_library(
     copts = [
         "-I" + MJ_ROOT + "/src",
         "-Wshadow",
+        "-fvisibility=hidden",
     ],
-    cxxopts = ["-std=c++20"],
+    cxxopts = [
+        "-fvisibility-inlines-hidden",
+        "-std=c++20",
+    ],
+    linkstatic = True,
     local_defines = [
         "MUJOCO_DLL_EXPORTS",
         "_GNU_SOURCE",
@@ -904,9 +1051,14 @@ cc_library(
     copts = [
         "-I" + MJ_ROOT + "/src",
         "-Wshadow",
+        "-fvisibility=hidden",
     ],
-    cxxopts = ["-std=c++20"],
+    cxxopts = [
+        "-fvisibility-inlines-hidden",
+        "-std=c++20",
+    ],
     linkopts = ["-ldl"],
+    linkstatic = True,
     local_defines = [
         "MUJOCO_DLL_EXPORTS",
         "_GNU_SOURCE",
@@ -925,8 +1077,13 @@ cc_library(
     copts = [
         "-I" + MJ_ROOT + "/src",
         "-Wshadow",
+        "-fvisibility=hidden",
     ],
-    cxxopts = ["-std=c++20"],
+    cxxopts = [
+        "-fvisibility-inlines-hidden",
+        "-std=c++20",
+    ],
+    linkstatic = True,
     local_defines = [
         "MUJOCO_DLL_EXPORTS",
         "_GNU_SOURCE",
@@ -949,8 +1106,13 @@ cc_library(
     copts = [
         "-I" + MJ_ROOT + "/src",
         "-Wshadow",
+        "-fvisibility=hidden",
     ],
-    cxxopts = ["-std=c++20"],
+    cxxopts = [
+        "-fvisibility-inlines-hidden",
+        "-std=c++20",
+    ],
+    linkstatic = True,
     local_defines = [
         "MUJOCO_DLL_EXPORTS",
         "_GNU_SOURCE",
@@ -968,8 +1130,13 @@ cc_library(
     copts = [
         "-I" + MJ_ROOT + "/src",
         "-Wshadow",
+        "-fvisibility=hidden",
     ],
-    cxxopts = ["-std=c++20"],
+    cxxopts = [
+        "-fvisibility-inlines-hidden",
+        "-std=c++20",
+    ],
+    linkstatic = True,
     local_defines = [
         "MUJOCO_DLL_EXPORTS",
         "_GNU_SOURCE",
@@ -988,8 +1155,13 @@ cc_library(
     copts = [
         "-I" + MJ_ROOT + "/src",
         "-Wshadow",
+        "-fvisibility=hidden",
     ],
-    cxxopts = ["-std=c++20"],
+    cxxopts = [
+        "-fvisibility-inlines-hidden",
+        "-std=c++20",
+    ],
+    linkstatic = True,
     local_defines = [
         "MUJOCO_DLL_EXPORTS",
         "_GNU_SOURCE",
@@ -1012,8 +1184,13 @@ cc_library(
     copts = [
         "-I" + MJ_ROOT + "/src",
         "-Wshadow",
+        "-fvisibility=hidden",
     ],
-    cxxopts = ["-std=c++20"],
+    cxxopts = [
+        "-fvisibility-inlines-hidden",
+        "-std=c++20",
+    ],
+    linkstatic = True,
     local_defines = [
         "MUJOCO_DLL_EXPORTS",
         "_GNU_SOURCE",
@@ -1041,14 +1218,20 @@ cc_library(
     copts = [
         "-I" + MJ_ROOT + "/src",
         "-Wshadow",
+        "-fvisibility=hidden",
     ],
-    cxxopts = ["-std=c++20"],
+    cxxopts = [
+        "-fvisibility-inlines-hidden",
+        "-std=c++20",
+    ],
+    linkstatic = True,
     local_defines = [
         "MUJOCO_DLL_EXPORTS",
         "_GNU_SOURCE",
         "mjUSEPLATFORMSIMD",
     ],
     deps = [
+        ":engine_crossplatform",
         ":engine_memory",
         ":engine_util_blas",
         ":engine_util_misc",
@@ -1064,8 +1247,13 @@ cc_library(
     copts = [
         "-I" + MJ_ROOT + "/src",
         "-Wshadow",
+        "-fvisibility=hidden",
     ],
-    cxxopts = ["-std=c++20"],
+    cxxopts = [
+        "-fvisibility-inlines-hidden",
+        "-std=c++20",
+    ],
+    linkstatic = True,
     local_defines = [
         "MUJOCO_DLL_EXPORTS",
         "_GNU_SOURCE",
@@ -1086,13 +1274,19 @@ cc_library(
     copts = [
         "-I" + MJ_ROOT + "/src",
         "-Wshadow",
+        "-fvisibility=hidden",
     ],
-    cxxopts = ["-std=c++20"],
+    cxxopts = [
+        "-fvisibility-inlines-hidden",
+        "-std=c++20",
+    ],
+    linkstatic = True,
     local_defines = [
         "MUJOCO_DLL_EXPORTS",
         "_GNU_SOURCE",
     ],
     deps = [
+        ":engine_crossplatform",
         ":engine_inline",
         ":engine_memory",
         ":engine_util_blas",
@@ -1108,8 +1302,15 @@ cc_library(
     name = "engine_inline",
     hdrs = ["engine_inline.h"],
     conlyopts = ["-std=c11"],
-    copts = ["-I" + MJ_ROOT + "/src"],
-    cxxopts = ["-std=c++20"],
+    copts = [
+        "-I" + MJ_ROOT + "/src",
+        "-fvisibility=hidden",
+    ],
+    cxxopts = [
+        "-fvisibility-inlines-hidden",
+        "-std=c++20",
+    ],
+    linkstatic = True,
     local_defines = [
         "MUJOCO_DLL_EXPORTS",
         "_GNU_SOURCE",
@@ -1128,8 +1329,13 @@ cc_library(
     copts = [
         "-I" + MJ_ROOT + "/src",
         "-Wshadow",
+        "-fvisibility=hidden",
     ],
-    cxxopts = ["-std=c++20"],
+    cxxopts = [
+        "-fvisibility-inlines-hidden",
+        "-std=c++20",
+    ],
+    linkstatic = True,
     local_defines = [
         "MUJOCO_DLL_EXPORTS",
         "_GNU_SOURCE",

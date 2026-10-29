@@ -49,6 +49,7 @@
 #include <pxr/base/gf/rotation.h>
 #include <pxr/base/gf/vec3d.h>
 #include <pxr/base/tf/staticData.h>
+#include <pxr/base/tf/stringUtils.h>
 #include <pxr/base/tf/token.h>
 #include <pxr/base/vt/types.h>
 #include <pxr/usd/sdf/path.h>
@@ -98,6 +99,31 @@ struct UsdCaches {
 };
 
 constexpr const char* kUsdPrimPathKey = "usd_primpath";
+
+std::string GetStageModelName(const pxr::UsdStageRefPtr& stage) {
+  pxr::UsdPrim default_prim = stage->GetDefaultPrim();
+  if (default_prim) {
+    std::string display_name = default_prim.GetDisplayName();
+    if (!display_name.empty()) {
+      return display_name;
+    }
+    std::string prim_name = default_prim.GetName().GetString();
+    if (!prim_name.empty()) {
+      return prim_name;
+    }
+  }
+
+  pxr::SdfLayerHandle root_layer = stage->GetRootLayer();
+  if (root_layer && !root_layer->IsAnonymous()) {
+    std::string layer_stem =
+        pxr::TfStringGetBeforeSuffix(root_layer->GetDisplayName());
+    if (!layer_stem.empty()) {
+      return layer_stem;
+    }
+  }
+
+  return "";
+}
 
 void SetUsdPrimPathUserValue(mjsElement* element,
                              const pxr::SdfPath& prim_path) {
@@ -864,18 +890,27 @@ void ParseUsdPhysicsScene(mjSpec* spec,
 
 void ParseUsdPhysicsMassAPIForBody(mjsBody* body,
                                    const pxr::UsdPhysicsMassAPI& mass_api) {
+  bool has_mass = false;
+  bool has_com = false;
+  bool has_diagonal_inertia = false;
+
   auto mass_attr = mass_api.GetMassAttr();
   if (mass_attr.HasAuthoredValue()) {
     float mass;
     mass_attr.Get(&mass);
     body->mass = mass;
+    has_mass = mass > 0;
   }
 
   auto com_attr = mass_api.GetCenterOfMassAttr();
   if (com_attr.HasAuthoredValue()) {
     pxr::GfVec3f com;
     com_attr.Get(&com);
-    SetDoubleArrFromGfVec3d(body->ipos, com);
+    if (std::isfinite(com[0]) && std::isfinite(com[1]) &&
+        std::isfinite(com[2])) {
+      SetDoubleArrFromGfVec3d(body->ipos, com);
+      has_com = true;
+    }
   }
 
   auto principle_axes_attr = mass_api.GetPrincipalAxesAttr();
@@ -890,6 +925,15 @@ void ParseUsdPhysicsMassAPIForBody(mjsBody* body,
     pxr::GfVec3f diag_inertia;
     diag_inertia_attr.Get(&diag_inertia);
     SetDoubleArrFromGfVec3d(body->inertia, diag_inertia);
+    has_diagonal_inertia =
+        diag_inertia[0] > 0 && diag_inertia[1] > 0 && diag_inertia[2] > 0;
+  }
+
+  if (has_mass && has_diagonal_inertia) {
+    body->explicitinertial = true;
+    if (!has_com) {
+      SetDoubleArrFromGfVec3d(body->ipos, pxr::GfVec3d(0, 0, 0));
+    }
   }
 
   auto newton_inertia_attr =
@@ -1978,13 +2022,17 @@ void ParseDisplayColorAndOpacity(const pxr::UsdPrim& prim, mjsGeom* geom) {
   }
 }
 
-void ParseUsdGeomGprim(mjSpec* spec, const pxr::UsdPrim& gprim,
-                       const pxr::UsdPrim& body_prim, mjsBody* parent,
-                       UsdCaches& caches) {
+mjsGeom* ParseUsdGeomGprim(mjSpec* spec, const pxr::UsdPrim& gprim,
+                           const pxr::UsdPrim& body_prim, mjsBody* parent,
+                           UsdCaches& caches) {
   mjsGeom* geom = mjs_addGeom(parent, nullptr);
   mjs_setName(geom->element, gprim.GetPath().GetAsString().c_str());
   geom->contype = 0;
   geom->conaffinity = 0;
+  if (!body_prim.IsPseudoRoot() ||
+      gprim.HasAPI<pxr::MjcPhysicsImageableAPI>()) {
+    geom->density = 0;
+  }
 
   SetUsdPrimPathUserValue(geom->element, gprim.GetPath());
 
@@ -2024,6 +2072,13 @@ void ParseUsdGeomGprim(mjSpec* spec, const pxr::UsdPrim& gprim,
     }
   }
 
+  if (gprim.HasAPI<pxr::UsdPhysicsMassAPI>()) {
+    ParseUsdPhysicsMassAPIForGeom(geom, pxr::UsdPhysicsMassAPI(gprim));
+  }
+
+  if (gprim.HasAPI<pxr::MjcPhysicsCollisionAPI>()) {
+    ParseMjcPhysicsCollisionAPI(geom, pxr::MjcPhysicsCollisionAPI(gprim));
+  }
   if (gprim.HasAPI<pxr::MjcPhysicsImageableAPI>()) {
     auto imageable_api = pxr::MjcPhysicsImageableAPI(gprim);
     auto group_attr = imageable_api.GetGroupAttr();
@@ -2031,6 +2086,8 @@ void ParseUsdGeomGprim(mjSpec* spec, const pxr::UsdPrim& gprim,
       group_attr.Get(&geom->group);
     }
   }
+
+  return geom;
 }
 
 void ParseUsdPhysicsCollider(mjSpec* spec,
@@ -2478,7 +2535,8 @@ void ParseUsdPhysicsJoint(mjSpec* spec, const pxr::UsdPrim& prim, mjsBody* body,
 
     float lower, upper;
     if (revolute.GetLowerLimitAttr().Get(&lower) &&
-        revolute.GetUpperLimitAttr().Get(&upper)) {
+        revolute.GetUpperLimitAttr().Get(&upper) &&
+        !(std::isinf(lower) && lower < 0 && std::isinf(upper) && upper > 0)) {
       mj_joint->limited = mjLIMITED_TRUE;
       if (spec->compiler.degree) {
         mj_joint->range[0] = lower;
@@ -2507,7 +2565,8 @@ void ParseUsdPhysicsJoint(mjSpec* spec, const pxr::UsdPrim& prim, mjsBody* body,
     }
     float lower, upper;
     if (prismatic.GetLowerLimitAttr().Get(&lower) &&
-        prismatic.GetUpperLimitAttr().Get(&upper)) {
+        prismatic.GetUpperLimitAttr().Get(&upper) &&
+        !(std::isinf(lower) && lower < 0 && std::isinf(upper) && upper > 0)) {
       mj_joint->limited = mjLIMITED_TRUE;
       mj_joint->range[0] = lower;
       mj_joint->range[1] = upper;
@@ -2706,6 +2765,37 @@ bool IsObjectInPhysicsScene(const T& object,
 // Helper type to store all the prims that belong to a body.
 using BodyPrimMap = std::map<pxr::SdfPath, std::vector<pxr::SdfPath>>;
 
+bool HasAuthoredMassOrDensity(const pxr::UsdPrim& prim) {
+  if (!prim.HasAPI<pxr::UsdPhysicsMassAPI>()) {
+    return false;
+  }
+  pxr::UsdPhysicsMassAPI mass_api(prim);
+  return mass_api.GetMassAttr().HasAuthoredValue() ||
+         mass_api.GetDensityAttr().HasAuthoredValue();
+}
+
+bool BodySubtreeHasMass(mjsBody* body) {
+  if (body->explicitinertial || body->mass > 0) {
+    return true;
+  }
+  for (mjsElement* el = mjs_firstChild(body, mjOBJ_GEOM, 0); el != nullptr;
+       el = mjs_nextChild(body, el, 0)) {
+    mjsGeom* geom = mjs_asGeom(el);
+    if (geom->mass > 0 || geom->density > 0) {
+      return true;
+    }
+  }
+  for (mjsElement* el = mjs_firstChild(body, mjOBJ_BODY, 0); el != nullptr;
+       el = mjs_nextChild(body, el, 0)) {
+    mjsBody* child = mjs_asBody(el);
+    if (mjs_firstChild(child, mjOBJ_JOINT, 0) == nullptr &&
+        BodySubtreeHasMass(child)) {
+      return true;
+    }
+  }
+  return false;
+}
+
 // Recursively traverses the kinematic tree, creating bodies, joints, and geoms
 // in the mjSpec.
 void PopulateSpecFromTree(pxr::UsdStageRefPtr stage, mjSpec* spec,
@@ -2749,10 +2839,14 @@ void PopulateSpecFromTree(pxr::UsdStageRefPtr stage, mjSpec* spec,
           ? stage->GetPseudoRoot()
           : stage->GetPrimAtPath(current_node->body_path);
 
+  std::vector<mjsGeom*> unauthored_visual_geoms;
   for (const auto& gprim_path : current_node->visual_gprims) {
     auto gprim = stage->GetPrimAtPath(gprim_path);
-    ParseUsdGeomGprim(spec, gprim, body_prim_for_xform, current_mj_body,
-                      caches);
+    mjsGeom* geom = ParseUsdGeomGprim(spec, gprim, body_prim_for_xform,
+                                      current_mj_body, caches);
+    if (!HasAuthoredMassOrDensity(gprim)) {
+      unauthored_visual_geoms.push_back(geom);
+    }
   }
 
   for (const auto& collider_path : current_node->colliders) {
@@ -2771,10 +2865,28 @@ void PopulateSpecFromTree(pxr::UsdStageRefPtr stage, mjSpec* spec,
     PopulateSpecFromTree(stage, spec, current_mj_body, current_node,
                          child_node.get(), caches);
   }
+
+  if (!unauthored_visual_geoms.empty() &&
+      mjs_firstChild(current_mj_body, mjOBJ_JOINT, 0) != nullptr &&
+      !BodySubtreeHasMass(current_mj_body)) {
+    mju_warning(
+        "Body '%s' has only visual gprims and no colliders or explicit "
+        "inertia; falling back to default density on visual geoms.",
+        current_node->body_path.GetText());
+    mjsGeom default_geom;
+    mjs_defaultGeom(&default_geom);
+    for (mjsGeom* geom : unauthored_visual_geoms) {
+      geom->density = default_geom.density;
+    }
+  }
 }
 
 mjSpec* ParseStage(const pxr::UsdStageRefPtr stage) {
   mjSpec* spec = mj_makeSpec();
+  std::string model_name = GetStageModelName(stage);
+  if (!model_name.empty()) {
+    mjs_setString(spec->modelname, model_name.c_str());
+  }
 
   std::unique_ptr<Node> root = BuildKinematicTree(stage);
 

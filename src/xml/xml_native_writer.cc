@@ -568,8 +568,10 @@ void mjXWriter::OneFlex(XMLElement* elem, const mjCFlex* flex) {
   // common attributes
   WriteAttrTxt(elem, "name", flex->name);
   WriteAttrTable(elem, values, static_cast<const mjsFlex*>(&defflex), kFlexAttrs, kFlexAttrsN);
-  const string& material = Pick(authored_, flex->spec.material, flex->get_material());
-  if (material != defflex.get_material()) { WriteAttrTxt(elem, "material", material); }
+  const auto& material = Pick(authored_, flex->spec.material, flex->get_material());
+  if (material != defflex.get_material() && !material.empty()) {
+    WriteAttrTxt(elem, "material", Numbers(material));
+  }
   WriteAttr(elem, "cellcount", 3, flex->spec.cellcount, defflex.spec.cellcount);
   if (flex->spec.order != defflex.spec.order) {
     string dof_str = "full";
@@ -942,6 +944,9 @@ void mjXWriter::OneJoint(XMLElement*     elem,
       if ((result.type == mjJNT_HINGE || result.type == mjJNT_BALL) && limits) {
         result.range[0] = Angle(owner, result.range[0]);
         result.range[1] = Angle(owner, result.range[1]);
+      }
+      if (result.type == mjJNT_HINGE || result.type == mjJNT_BALL) {
+        result.springyield = Angle(owner, result.springyield);
       }
       if (result.type == mjJNT_HINGE) {
         result.ref       = Angle(owner, result.ref);
@@ -1450,7 +1455,6 @@ void mjXWriter::OneEquality(XMLElement* elem, const mjCEquality* pequality, mjCD
         break;
 
       case mjEQ_FLEX:
-      case mjEQ_FLEXVERT:
         WriteAttrTxt(elem, "flex", mjs_getString(equality->name1));
         break;
 
@@ -1473,7 +1477,7 @@ void mjXWriter::OneEquality(XMLElement* elem, const mjCEquality* pequality, mjCD
 void mjXWriter::OneTendon(XMLElement* elem, const mjCTendon* ptendon, mjCDef* def) {
   const mjCTendon* base   = ptendon;
   const mjsTendon* tendon = Values<mjsTendon>(ptendon);
-  bool             fixed  = (base->GetWrap(0) && base->GetWrap(0)->Type() == mjWRAP_JOINT);
+  bool             fixed  = (base->Type() == mjTENDON_FIXED);
 
   // regular
   if (!writingdefaults) {
@@ -2044,6 +2048,7 @@ void mjXWriter::Option(XMLElement* root) {
     WRITEENBL("sleep",          mjENBL_SLEEP)
     WRITEENBL("diagexact",      mjENBL_DIAGEXACT)
     WRITEENBL("ipc",            mjENBL_IPC)
+    WRITEENBL("speculative",    mjENBL_SPECULATIVE)
     // clang-format on
 #undef WRITEENBL
   }
@@ -2830,8 +2835,7 @@ void mjXWriter::Tendon(XMLElement* root) {
     if (!tendon->NumWraps()) {  // SHOULD NOT OCCUR
       continue;
     }
-    XMLElement* elem =
-        InsertEnd(section, tendon->GetWrap(0)->Type() == mjWRAP_JOINT ? "fixed" : "spatial");
+    XMLElement* elem = InsertEnd(section, tendon->Type() == mjTENDON_FIXED ? "fixed" : "spatial");
     OneTendon(elem, tendon, model->def_map[tendon->classname]);
 
     // write wraps
@@ -3267,14 +3271,15 @@ void mjXWriter::Keyframe(XMLElement* root) {
       XMLElement* elem = InsertEnd(section, "key");
       WriteAttrTxt(elem, "name", key->name);
       if (key->spec.time != 0) { WriteAttr(elem, "time", 1, &key->spec.time); }
-      const std::vector<double>* vectors[6] = {&key->spec_qpos_,
+      const std::vector<double>* vectors[7] = {&key->spec_qpos_,
                                                &key->spec_qvel_,
                                                &key->spec_act_,
                                                &key->spec_mpos_,
                                                &key->spec_mquat_,
-                                               &key->spec_ctrl_};
-      const char*                names[6]   = {"qpos", "qvel", "act", "mpos", "mquat", "ctrl"};
-      for (int k = 0; k < 6; k++) {
+                                               &key->spec_ctrl_,
+                                               &key->spec_plastic_};
+      const char* names[7] = {"qpos", "qvel", "act", "mpos", "mquat", "ctrl", "plastic"};
+      for (int k = 0; k < 7; k++) {
         if (!vectors[k]->empty()) {
           WriteAttr(elem, names[k], vectors[k]->size(), vectors[k]->data());
         }
@@ -3371,6 +3376,15 @@ void mjXWriter::Keyframe(XMLElement* root) {
     for (int j = 0; j < model->nu; j++) {
       if (key->ctrl_[j] != 0) {
         WriteAttr(elem, "ctrl", model->nu, key->ctrl_.data());
+        change = true;
+        break;
+      }
+    }
+
+    // check plastic and write
+    for (int j = 0; j < model->nplastic; j++) {
+      if (key->plastic_[j] != model->plastic0[j]) {
+        WriteAttr(elem, "plastic", model->nplastic, key->plastic_.data());
         change = true;
         break;
       }

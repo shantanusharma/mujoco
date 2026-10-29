@@ -514,7 +514,6 @@ mjModel* mj_embedAssets(const mjModel* m, char* error, int error_sz) {
                m->nflexshelldata,
                m->nflextexcoord,
                m->nJfe,
-               m->nJfv,
                m->nmesh,
                m->nmeshvert,
                m->nmeshnormal,
@@ -561,7 +560,8 @@ mjModel* mj_embedAssets(const mjModel* m, char* error, int error_sz) {
                m->nuser_actuator,
                m->nuser_sensor,
                m->nnames,
-               m->npaths);
+               m->npaths,
+               m->nplastic);
   if (!dest) {
     free_pixels();
     CopyError(error, error_sz, "could not allocate model");

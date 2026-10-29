@@ -102,7 +102,8 @@ static void PrepareGeomMeshes(mjrfRenderable* renderable, const mjvGeom& geom,
       mjrf_setRenderableSize(renderable, geom.size);
       break;
     case mjGEOM_FLEX:
-      mjrf_setRenderableMesh(renderable, scene_objs->GetFlexMesh(geom.objid), 0, 0);
+      mjrf_setRenderableMesh(
+          renderable, scene_objs->GetFlexMesh(geom.objid, geom.dataid), 0, 0);
       // Flexes are defined in global space.
       std::memset(position, 0, sizeof(position));
       std::memset(rotation, 0, sizeof(rotation));
@@ -278,6 +279,7 @@ UniquePtr<mjrfRenderable> CreateGeomRenderable(const mjvGeom& geom,
                                                SceneObjects* scene_objs) {
   mjrfRenderableParams params;
   mjrf_defaultRenderableParams(&params);
+  params.cast_shadow = geom.castshadow;
   auto renderable = CreateRenderable(ctx, params);
   PrepareGeomMeshes(renderable.get(), geom, model_objs, scene_objs);
   UpdateGeomMaterial(renderable.get(), geom, model_objs);

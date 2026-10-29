@@ -5,23 +5,101 @@ Changelog
 Upcoming Version (not yet released)
 -----------------------------------
 
+Significant new features
+^^^^^^^^^^^^^^^^^^^^^^^^
+- Added the :ref:`speculative<option-flag-speculative>` enable flag for :doc:`speculative contacts
+  <computation/speculative>` to prevent fast-moving convex geoms from tunneling through thin obstacles within a single
+  timestep.
+
+.. image:: https://www.gstatic.com/mujoco/doc/images/changelog/wire.gif
+   :align: right
+   :width: 40%
+   :target: https://github.com/google-deepmind/mujoco/blob/main/model/plastic/wire.xml
+
+- Added ideal elasto-plasticity for joint (:ref:`springyield<body-joint-springyield>`) and tendon
+  (:ref:`spatial<tendon-spatial-springyield>`, :ref:`fixed<tendon-fixed-springyield>`) springs, with stateful plastic
+  spring references in ``mjData.plastic`` (``mjSTATE_PLASTIC``).
+
+.. image:: https://www.gstatic.com/mujoco/doc/images/changelog/clay.gif
+   :align: right
+   :width: 40%
+   :target: https://github.com/google-deepmind/mujoco/blob/main/model/flex/clay.xml
+
+- Added continuum elasto-plasticity (:ref:`yield<flex-elasticity-yield>`) for non-interpolated 2D and 3D
+  :ref:`flexes<deformable-flex>`, with volumetric-deviatoric (von Mises :math:`J_2`) stretching return mapping in
+  ``mjData.plastic``.
+
+.. container:: custom-clear
+
+   .. raw:: html
+
+      <div style="clear: both;"></div>
+
+General
+^^^^^^^
+.. admonition:: Breaking API changes
+   :class: attention
+
+   - Flexes now support per-element visual materials: ``mjModel.flex_matid`` is now ``(nflexelem x 1)`` instead of
+     ``(nflex x 1)``, and the ``material`` attribute on :ref:`flex<deformable-flex>` and :ref:`flexcomp<body-flexcomp>`
+     (``mjsFlex.material``) is now ``mjStringVec`` rather than ``mjString`` (accepting either a single material name
+     broadcast to all elements or one material name per element).
+
+     **Migration:** Index ``mjModel.flex_matid`` by element ``m->flex_elemadr[f] + e`` rather than by flex ``f``. In C,
+     set ``mjsFlex.material`` with ``mjs_setStringVec`` (or ``mjs_appendString``) instead of ``mjs_setString``; in
+     Python, assign a list of material names (e.g. ``flex.material = ['mat']``).
+
+   - Removed ``flexvert`` equality constraints (``<equality><flexvert>`` and ``<edge equality="vert"/>`` in
+     :ref:`flexcomp<body-flexcomp>`), along with the associated :ref:`mjModel` fields (``nJfv``, ``flex_vertedgeadr``,
+     ``flex_vertedgenum``, ``flex_vertedge``, ``flex_vertmetric``, ``flexvert_J_rownnz``, ``flexvert_J_rowadr``,
+     ``flexvert_J_colind``) and :ref:`mjData` fields (``flexvert_length``, ``flexvert_J``). ``mjEQ_FLEXVERT`` is
+     retained as an unsupported placeholder in :ref:`mjtEq` and causes an error if used.
+
+     **Migration:** Use continuum :ref:`elasticity<flex-elasticity>` with ``integrator="discrete"`` or
+     :ref:`edge equality<flexcomp-edge-equality>` for 2D cloth models.
+
+   - Unpinned :ref:`flexcomp<body-flexcomp>` models (with **full**, **trilinear**, or **quadratic**
+     :ref:`dofs<body-flexcomp-dof>`) now fail to compile if their parent or ancestor body has joints when no active
+     vertices or nodes are :ref:`pinned<flexcomp-pin>` to it.
+
+     **Migration:** Remove joints from the parent/ancestor body of an unpinned flex, or pin at least one vertex/node to
+     the parent body with :ref:`pin<flexcomp-pin>`.
+
+   - Records of 1D flexes in ``mjModel.flex_bending`` grow from 4 to 10 values, to store curved reference
+     configurations and pairs of adjacent bent vertices. Previously, each record was ``[v_prev, v, v_next, k]``.
+
+     **Migration:** Read 1D records with stride 10. A record whose fourth value is negative is a single hinge
+     ``[v0, v1, v2, -1, k, 0, |kb0|, 0, 0, 0]``; otherwise it is a hinge pair ``[v0, v1, v2, v3, w0, w1, om0[4]]``.
+
+- Added a :ref:`castshadow<body-geom-castshadow>` attribute to :ref:`geom<body-geom>` (``mjsGeom.castshadow``,
+  ``mjModel.geom_castshadow``, ``mjvGeom.castshadow``; default ``true``) to disable shadow casting per geom in both the
+  classic OpenGL and Filament renderers.
+- Added ``mjModel.tendon_type`` with values from the new :ref:`mjtTendon` enum, distinguishing fixed and spatial
+  tendons. Previously, the type was implied by whether the first path element was a joint.
+
 Engine
 ^^^^^^
-- Contacts with flex elements now distribute the contact to the element vertices with the barycentric coordinates of the
-  point on the element closest to the contact. Previously the vertex weights were inversely proportional to the
-  distances from the contact, which do not interpolate the contact point: the contact Jacobian measured the velocity of
-  a different material point, and the contact force exerted a spurious torque on the element. This changes the
-  simulation of models with flex contacts.
-- Fixed contact Jacobians of quadratic flexes, which dropped nodes with negative basis weights.
-- Interpolated flexes (**trilinear** or **quadratic** :ref:`dofs<body-flexcomp-dof>`) now support
-  :ref:`passive<flex-contact-passive>` contact.
-- Improved numerical stability of sphere and cylinder :ref:`spatial tendon<tendon-spatial>` :ref:`geom<spatial-geom>`
-  wrapping at wrap onset. Thanks to :github:user:`M-Colley` for reporting and analyzing the issue in
-  :doc:`MJWarp <mjwarp/index>` issue `1772 <https://github.com/google-deepmind/mujoco_warp/issues/1772>`__.
-- Flex integration changes:
+- Flex improvements:
 
+  - Volumetric interpolated flexes (**trilinear** or **quadratic** :ref:`dofs<body-flexcomp-dof>` with ``elastic2d="none"``)
+    now integrate cell stiffness and lump nodal masses over the mesh volume using Finite Cell Method (FCM) subcell
+    quadrature instead of treating every non-empty grid cell as a full cube. This changes the stiffness and nodal mass
+    distribution of volumetric interpolated flexes whose mesh does not fill its bounding box, as well as the nodal mass
+    distribution of multi-cell **trilinear** flexes.
+  - Interpolated flexes (**trilinear** or **quadratic** :ref:`dofs<body-flexcomp-dof>`) now support
+    :ref:`passive<flex-contact-passive>` contact.
+  - Contacts with flex elements now distribute the contact to the element vertices with the barycentric coordinates of the
+    point on the element closest to the contact. Previously the vertex weights were inversely proportional to the
+    distances from the contact, which do not interpolate the contact point: the contact Jacobian measured the velocity of
+    a different material point, and the contact force exerted a spurious torque on the element. This changes the
+    simulation of models with flex contacts.
+  - Fixed contact Jacobians of quadratic flexes, which dropped nodes with negative basis weights.
   - Flex :ref:`edge damping<flex-edge-damping>` is now integrated explicitly under ``implicit`` and ``implicitfast``
     (previously it also damped rigid translation).
+  - 1D rod bending :ref:`elasticity<flex-elasticity>` now supports curved reference configurations: vertices bent by
+    more than :math:`10^{-4}` rad in ``qpos0`` keep their reference curvature, so that rods such as rings and arcs are
+    at rest in their compiled shape. Previously, such models failed to compile. Curved rods have no torsional
+    stiffness, see the :ref:`documentation<flex-elasticity>` (or use the :ref:`cable<CComposite>` composite).
   - 1D rod bending :ref:`elasticity<flex-elasticity>` (``dim="1"`` with positive ``young``) is no longer supported under
     ``implicit`` and ``implicitfast``, matching 2D and 3D flex elasticity. Migrate to ``integrator="discrete"`` for
     implicit integration, or ``integrator="Euler"`` with a small timestep for explicit integration.
@@ -29,9 +107,54 @@ Engine
     ``integrator="discrete"`` (where they were integrated explicitly rather than in the effective metric). Migrate to
     :ref:`elasticity<flex-elasticity>` (or :ref:`edge equality<flexcomp-edge-equality>`), or use ``Euler``/``RK4``/``implicitfast``.
 
+- Improved numerical stability of sphere and cylinder :ref:`spatial tendon<tendon-spatial>` :ref:`geom<spatial-geom>`
+  wrapping at wrap onset. Thanks to :github:user:`M-Colley` for reporting and analyzing the issue in
+  :doc:`MJWarp <mjwarp/index>` issue `1772 <https://github.com/google-deepmind/mujoco_warp/issues/1772>`__.
+- The ``RK4`` :ref:`integrator<option-integrator>` is now fourth-order accurate for the orientations of ball and free
+  joints. Previously, the angular velocities of the Runge-Kutta stages were combined without the Runge-Kutta-Munthe-Kaas
+  correction, so orientations converged only at second order. This changes the simulation of models with ball or free
+  joints that use ``RK4``.
+- Added ``surfacevel[3]`` to :ref:`mjContact`, storing the relative :ref:`surface velocity<body-geom-surfacevel>`
+  (``geom[1]`` minus ``geom[0]``) in the contact frame ``(tangent1, tangent2, spin)``. Collision detection populates it
+  from ``geom_surfacevel`` when ``mjModel.flg_surfacevel`` is set, and external contact generators can write it
+  directly (setting ``flg_surfacevel = 1`` if no geom specifies ``surfacevel``). Contact-point visualization now draws
+  a single relative tangential velocity arrow per active frictional contact.
+
+Filament Rendering
+^^^^^^^^^^^^^^^^^^
+- Added horizon haze and skybox visibility support: infinite planes are centered beneath the camera and blend smoothly
+  into the skybox horizon according to :ref:`visual/map/haze<visual-map-haze>` and
+  :ref:`visual/rgba/haze<visual-rgba-haze>`, toggled per view via ``haze`` and ``skybox`` on :ref:`mjrfRenderRequest`
+  (:ref:`mjRND_HAZE<mjtRndFlag>` and :ref:`mjRND_SKYBOX<mjtRndFlag>`).
+- Added :ref:`mjrf_flush` (``mjrf.Context.flush`` in Python) to flush pending operations to the rendering backend and
+  invoke any completed callbacks.
+- Added :ref:`mjrf_setRenderableCastShadow` (``mjrf.Renderable.set_cast_shadow`` in Python) to dynamically toggle
+  whether a renderable casts shadows.
+- When no light specifies an :ref:`intensity<body-light-intensity>`, the fallback intensity given to each light is now
+  scaled by the brightness of its diffuse color, which is factored out of the light's color. Lights look the same,
+  but the brightest directional light now casts the shadows, rather than an arbitrary one that could differ between
+  runs.
+
+Rendering
+^^^^^^^^^
+- Added :ref:`mjRND_POST_PROCESSING<mjtRndFlag>` rendering flag.
+
 Python bindings
 ^^^^^^^^^^^^^^^
 - Removed support for Python 3.10, now that it's `deprecated upstream <https://devguide.python.org/versions>`__.
+
+Bug fixes
+^^^^^^^^^
+- :ref:`mj_setConst` now wakes all :ref:`sleeping<siSleep>` trees, since it recomputes their kinematics at ``qpos0`` and
+  ``qpos_spring``. Previously their cached poses could be left at ``qpos_spring``. It also no longer overwrites
+  ``cam_xpos``, ``cam_xmat``, ``light_xpos`` and ``light_xdir`` in :ref:`mjData`, which left static cameras and lights
+  with tracking or targeting at their fixed-mode poses.
+
+Documentation
+^^^^^^^^^^^^^
+- Added documentation for :ref:`MuJoCo Studio <Studio>`, covering :ref:`web <StudioWebViewers>` and
+  :ref:`native <StudioNativeViewers>` viewers, :ref:`architecture <StudioArchitecture>`, and
+  :ref:`Python <StudioPythonPlugins>` and :ref:`C++ <StudioCpp>` development.
 
 Version 3.17.0 (October 22, 2026)
 ---------------------------------
@@ -1478,9 +1601,9 @@ Significant new features
    :align: right
    :target: https://github.com/google-deepmind/mujoco/blob/main/model/flex/poncho.xml
 
-4. :commit:`7da271c6` Added new :ref:`flexvert<equality-flexvert>` equality constraints that enable cloth simulations
+4. :commit:`7da271c6` Added new ``flexvert`` equality constraints that enable cloth simulations
    with coarser meshes. This adds a new attribute value ``vert`` to flexcomp edge
-   :ref:`equality<flexcomp-edge-equality>` and the new equality type :ref:`flexvert<equality-flexvert>`. Uses the method
+   :ref:`equality<flexcomp-edge-equality>` and the new equality type ``flexvert``. Uses the method
    described in `Chen, Kry and Vouga, 2019 <https://arxiv.org/abs/1911.05204>`__.
 5. :commit:`0041fdcb` Added implicit integration support for deformable objects (flex) in ``implicit`` and
    ``implicitfast`` :ref:`integrators<geIntegration>`. This method extracts the flex degrees of freedom and solves them

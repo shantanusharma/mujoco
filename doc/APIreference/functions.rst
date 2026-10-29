@@ -3271,6 +3271,15 @@ invocation of this function it will be done.
 Waits for all rendering operations to complete for the given frame handle, triggering any
 callbacks as needed.
 
+.. _mjrf_flush:
+
+`mjrf_flush <#mjrf_flush>`__
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+.. mujoco-include:: mjrf_flush
+
+Flushes pending operations to the rendering backend and invokes any completed callbacks.
+
 .. _mjrf_setClearColor:
 
 `mjrf_setClearColor <#mjrf_setClearColor>`__
@@ -3727,6 +3736,15 @@ Sets the position and rotation of the renderable.
 Sets the size of the renderable. Note that, for most renderables, this is equivalent to setting
 the scale. However, for some geom-based renderables, the size scale is not applied uniformly
 (e.g. the spherical ends of a capsule are scaled such that they always remain spherical).
+
+.. _mjrf_setRenderableCastShadow:
+
+`mjrf_setRenderableCastShadow <#mjrf_setRenderableCastShadow>`__
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+.. mujoco-include:: mjrf_setRenderableCastShadow
+
+Enables or disables whether or not the renderable casts shadows.
 
 .. _mjrf_defaultRenderTargetConfig:
 

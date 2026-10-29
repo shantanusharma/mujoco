@@ -241,7 +241,7 @@ void mj_makeModel(mjModel** dest,
     mjtSize nflex, mjtSize nflexnode, mjtSize nflexvert, mjtSize nflexedge, mjtSize nflexelem,
     mjtSize nflexelemdata, mjtSize nflexstiffness, mjtSize nflexbending,
     mjtSize nefm0dof, mjtSize nefm0L, mjtSize nefmCvert, mjtSize nflexelemedge,
-    mjtSize nflexshelldata, mjtSize nflextexcoord, mjtSize nJfe, mjtSize nJfv,
+    mjtSize nflexshelldata, mjtSize nflextexcoord, mjtSize nJfe,
     mjtSize nmesh, mjtSize nmeshvert, mjtSize nmeshnormal, mjtSize nmeshtexcoord, mjtSize nmeshface,
     mjtSize nmeshgraph, mjtSize nmeshpoly, mjtSize nmeshpolyvert, mjtSize nmeshpolymap,
     mjtSize nskin, mjtSize nskinvert, mjtSize nskintexvert, mjtSize nskinface, mjtSize nskinbone,
@@ -251,7 +251,7 @@ void mj_makeModel(mjModel** dest,
     mjtSize ntextdata, mjtSize ntuple, mjtSize ntupledata, mjtSize nkey, mjtSize nmocap,
     mjtSize nplugin, mjtSize npluginattr, mjtSize nuser_body, mjtSize nuser_jnt, mjtSize nuser_geom,
     mjtSize nuser_site, mjtSize nuser_cam, mjtSize nuser_tendon, mjtSize nuser_actuator,
-    mjtSize nuser_sensor, mjtSize nnames, mjtSize npaths) {
+    mjtSize nuser_sensor, mjtSize nnames, mjtSize npaths, mjtSize nplastic) {
   intptr_t offset = 0;
   int allocate = *dest ? 0 : 1;
   mjModel* m = NULL;
@@ -281,8 +281,8 @@ void mj_makeModel(mjModel** dest,
     // suppress unused variable warnings
     (void)nnames_map; (void)nJmom; (void)ngravcomp; (void)nemax; (void)njmax; (void)nconmax;
     (void)npolygonmax; (void)nmeshdegmax;
-    (void)nuserdata; (void)nsensordata; (void)npluginstate; (void)nhistory; (void)narena;
-    (void)nbuffer;
+    (void)nuserdata; (void)nsensordata; (void)npluginstate; (void)nhistory;
+    (void)narena; (void)nbuffer;
   }
 
   // nbody should always be positive
@@ -341,7 +341,6 @@ void mj_makeModel(mjModel** dest,
   m->nflexshelldata = nflexshelldata;
   m->nflextexcoord = nflextexcoord;
   m->nJfe = nJfe;
-  m->nJfv = nJfv;
   m->nmesh = nmesh;
   m->nmeshvert = nmeshvert;
   m->nmeshnormal = nmeshnormal;
@@ -398,6 +397,7 @@ void mj_makeModel(mjModel** dest,
   }
   m->nnames_map = mjLOAD_MULTIPLE * nnames_map;
   m->npaths = npaths;
+  m->nplastic = nplastic;
 
   // compute buffer size, including padding to align the first array at any buffer address
   m->nbuffer = BUFFER_ALIGN - 1;
@@ -450,7 +450,7 @@ mjModel* mj_copyModel(mjModel* dest, const mjModel* src) {
         src->nflexedge, src->nflexelem, src->nflexelemdata, src->nflexstiffness,
         src->nflexbending, src->nefm0dof, src->nefm0L, src->nefmCvert, src->nflexelemedge,
         src->nflexshelldata,
-        src->nflextexcoord, src->nJfe, src->nJfv, src->nmesh, src->nmeshvert, src->nmeshnormal,
+        src->nflextexcoord, src->nJfe, src->nmesh, src->nmeshvert, src->nmeshnormal,
         src->nmeshtexcoord, src->nmeshface, src->nmeshgraph, src->nmeshpoly, src->nmeshpolyvert,
         src->nmeshpolymap, src->nskin, src->nskinvert, src->nskintexvert, src->nskinface,
         src->nskinbone, src->nskinbonevert, src->nhfield, src->nhfielddata, src->ntex,
@@ -458,7 +458,8 @@ mjModel* mj_copyModel(mjModel* dest, const mjModel* src) {
         src->nwrap, src->nsensor, src->nnumeric, src->nnumericdata, src->ntext, src->ntextdata,
         src->ntuple, src->ntupledata, src->nkey, src->nmocap, src->nplugin, src->npluginattr,
         src->nuser_body, src->nuser_jnt, src->nuser_geom, src->nuser_site, src->nuser_cam,
-        src->nuser_tendon, src->nuser_actuator, src->nuser_sensor, src->nnames, src->npaths);
+        src->nuser_tendon, src->nuser_actuator, src->nuser_sensor, src->nnames, src->npaths,
+        src->nplastic);
   }
   if (!dest) {
     mjERROR("failed to make mjModel. Invalid sizes.");
@@ -1317,6 +1318,51 @@ mjData* mjv_copyData(mjData* dest, const mjModel* m, const mjData* src) {
 }
 
 
+// number of position and velocity coordinates for each joint type
+const int nPOS[4] = {7, 4, 1, 1};
+const int nVEL[4] = {6, 3, 1, 1};
+
+
+// initialize plastic state from model spring references
+void mj_resetPlastic(const mjModel* m, mjData* d) {
+  if (!m->nplastic) {
+    return;
+  }
+  if (m->qpos_spring && m->jnt_plasticadr) {
+    for (int j=0; j < m->njnt; j++) {
+      int adr = m->jnt_plasticadr[j];
+      if (adr >= 0) {
+        mju_copy(d->plastic + adr, m->qpos_spring + m->jnt_qposadr[j], nPOS[m->jnt_type[j]]);
+      }
+    }
+  }
+  if (m->tendon_lengthspring && m->tendon_plasticadr) {
+    for (int i=0; i < m->ntendon; i++) {
+      int adr = m->tendon_plasticadr[i];
+      if (adr >= 0) {
+        mju_copy(d->plastic + adr, m->tendon_lengthspring + 2*i, 2);
+      }
+    }
+  }
+  if (m->flex_plasticadr) {
+    for (int f=0; f < m->nflex; f++) {
+      int adr = m->flex_plasticadr[f];
+      if (adr >= 0) {
+        int dim = m->flex_dim[f];
+        int n = 0;
+        if (m->flex_stiffnessadr[f] >= 0 && m->flex_stiffness[m->flex_stiffnessadr[f]] != 0) {
+          n += (dim == 2 ? 3 : 6) * m->flex_elemnum[f];
+        }
+        mju_zero(d->plastic + adr, n);
+        if (d->flex_hessian_valid) {
+          d->flex_hessian_valid[f] = 0;
+        }
+      }
+    }
+  }
+}
+
+
 // clear data, set defaults
 static void _resetData(const mjModel* m, mjData* d, unsigned char debug_value) {
   // warn if history buffers cannot be initialized
@@ -1425,6 +1471,7 @@ static void _resetData(const mjModel* m, mjData* d, unsigned char debug_value) {
   mju_zero(d->qpos, m->nq);
   mju_zero(d->qvel, m->nv);
   mju_zero(d->act, m->na);
+  mju_zero(d->plastic, m->nplastic);
   mj_resetCtrl(m, d);
   for (int i=0; i < m->neq; i++) d->eq_active[i] = m->eq_active0[i];
   mju_zero(d->qfrc_applied, m->nv);
@@ -1501,6 +1548,9 @@ static void _resetData(const mjModel* m, mjData* d, unsigned char debug_value) {
   if (m->qpos0) {
     mju_copy(d->qpos, m->qpos0, m->nq);
   }
+
+  // initialize plastic state from model spring references
+  mj_resetPlastic(m, d);
 
   // restore pluginstate and plugindata
   if (d->nplugin) {
@@ -1721,6 +1771,7 @@ void mj_resetDataKeyframe(const mjModel* m, mjData* d, int key) {
     mju_copy(d->mocap_pos,  m->key_mpos+key*3*m->nmocap, 3*m->nmocap);
     mju_copy(d->mocap_quat, m->key_mquat+key*4*m->nmocap, 4*m->nmocap);
     mju_copy(d->ctrl, m->key_ctrl+key*m->nu, m->nu);
+    mju_copy(d->plastic, m->key_plastic+key*m->nplastic, m->nplastic);
   }
 }
 
@@ -1734,10 +1785,6 @@ void mj_deleteData(mjData* d) {
   }
 }
 
-
-// number of position and velocity coordinates for each joint type
-const int nPOS[4] = {7, 4, 1, 1};
-const int nVEL[4] = {6, 3, 1, 1};
 
 static int sensorSize(mjtSensor sensor_type, int sensor_dim) {
   switch (sensor_type) {
@@ -1955,12 +2002,11 @@ const char* mj_validateReferences(const mjModel* m) {
   X(flex_vertadr,       nflex,          nflexvert     , m->flex_vertnum        ) \
   X(flex_edgeadr,       nflex,          nflexedge     , m->flex_edgenum        ) \
   X(flex_elemadr,       nflex,          nflexelem     , m->flex_elemnum        ) \
+  X(flex_matid,         nflexelem,      nmat          , 0                      ) \
   X(flex_texcoordadr,   nflex,          nflextexcoord , 0                      ) \
   X(flex_elemdataadr,   nflex,          nflexelemdata , 0                      ) \
   X(flex_elemedgeadr,   nflex,          nflexelemedge , 0                      ) \
   X(flex_shelldataadr,  nflex,          nflexshelldata, 0                      ) \
-  X(flex_vertedgeadr,   nflexvert,      nflexedge*2   , m->flex_vertedgenum    ) \
-  X(flex_vertedge,      nflexedge*2,    nflexedge     , 0                      ) \
   X(flex_edge,          nflexedge*2,    nflexvert     , 0                      ) \
   X(flex_elem,          nflexelemdata,  nflexvert     , 0                      ) \
   X(flex_elemedge,      nflexelemedge,  nflexedge     , 0                      ) \
@@ -2055,7 +2101,6 @@ const char* mj_validateReferences(const mjModel* m) {
   VALIDATE_SPARSE(B,          m->nbody,       m->nv,       m->nB,     1);
   VALIDATE_SPARSE(ten_J,      m->ntendon,     m->nv,       m->nJten,  0);
   VALIDATE_SPARSE(flexedge_J, m->nflexedge,   m->nv,       m->nJfe,   1);
-  VALIDATE_SPARSE(flexvert_J, 2*m->nflexvert, m->nv,       2*m->nJfv, 1);
   VALIDATE_SPARSE(efm0_L,     m->nefm0dof,    m->nefm0dof, m->nefm0L, 1);
   #undef VALIDATE_SPARSE
 
@@ -2115,6 +2160,17 @@ const char* mj_validateReferences(const mjModel* m) {
     int jnt_dofadr = m->jnt_dofadr[i] + nVEL[m->jnt_type[i]];
     if (jnt_dofadr > m->nv || m->jnt_dofadr[i] < 0) {
       return "Invalid model: jnt_dofadr out of bounds.";
+    }
+    if (m->jnt_plasticadr[i] < -1 ||
+        (m->jnt_plasticadr[i] >= 0 &&
+         m->jnt_plasticadr[i] + nPOS[m->jnt_type[i]] > m->nplastic)) {
+      return "Invalid model: jnt_plasticadr out of bounds.";
+    }
+  }
+  for (int i=0; i < m->ntendon; i++) {
+    if (m->tendon_plasticadr[i] < -1 ||
+        (m->tendon_plasticadr[i] >= 0 && m->tendon_plasticadr[i] + 2 > m->nplastic)) {
+      return "Invalid model: tendon_plasticadr out of bounds.";
     }
   }
   mjtSize nM_post = 0;
@@ -2195,6 +2251,13 @@ const char* mj_validateReferences(const mjModel* m) {
       if (m->flex_interp[f] ? (c < 0 || c >= ncell) : (c != -1)) {
         return "Invalid model: flex_vertcell out of bounds.";
       }
+    }
+    int dim = m->flex_dim[f];
+    int nplastic = (m->flex_stiffnessadr[f] >= 0 && m->flex_stiffness[m->flex_stiffnessadr[f]] != 0)
+                   ? (dim == 2 ? 3 : 6) * m->flex_elemnum[f] : 0;
+    if (m->flex_plasticadr[f] < -1 ||
+        (m->flex_plasticadr[f] >= 0 && m->flex_plasticadr[f] + nplastic > m->nplastic)) {
+      return "Invalid model: flex_plasticadr out of bounds.";
     }
   }
   for (int i=0; i < m->ngeom; i++) {
@@ -2352,7 +2415,6 @@ const char* mj_validateReferences(const mjModel* m) {
       break;
 
     case mjEQ_FLEX:
-    case mjEQ_FLEXVERT:
     case mjEQ_FLEXSTRAIN:
       if (obj1id >= m->nflex || obj1id < 0) {
         return "Invalid model: eq_obj1id out of bounds.";

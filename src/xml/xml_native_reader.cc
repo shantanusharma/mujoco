@@ -432,6 +432,7 @@ void mjXReader::Option(XMLElement* section, mjSpec* s, mjOption* opt) {
     READENBL("sleep",       mjENBL_SLEEP)
     READENBL("diagexact",   mjENBL_DIAGEXACT)
     READENBL("ipc",         mjENBL_IPC)
+    READENBL("speculative", mjENBL_SPECULATIVE)
     // clang-format on
 #undef READENBL
   }
@@ -1107,7 +1108,6 @@ void mjXReader::OneEquality(XMLElement* elem, mjsEquality* equality) {
         break;
 
       case mjEQ_FLEX:
-      case mjEQ_FLEXVERT:
         ReadAttrTxt(elem, "flex", name1, true);
         break;
 
@@ -1544,9 +1544,14 @@ void mjXReader::OneFlexcomp(XMLElement* elem, mjsBody* body, const mjVFS* vfs) {
     throw mjXError(elem, "both 'file' and 'mesh' specified");
   }
   if (!fcomp.mesh.empty() && !elem->Attribute("type")) { fcomp.type = mjFCOMPTYPE_MESH; }
-  if (ReadAttrTxt(elem, "material", material)) { mjs_setString(dflex.material, material.c_str()); }
+  if (ReadAttrTxt(elem, "material", material)) {
+    mjs_setStringVec(dflex.material, material.c_str());
+  }
   ReadAttr(elem, "rgba", 4, dflex.rgba, text);
-  if (MapValue(elem, "flatskin", &n, bool_map, 2)) { dflex.flatskin = (n == 1); }
+  if (MapValue(elem, "flatskin", &n, bool_map, 2)) {
+    dflex.flatskin     = (n == 1);
+    fcomp.has_flatskin = true;
+  }
   if (ReadAttrInt(elem, "dim", &dflex.dim)) { fcomp.has_dim = true; }
   ReadAttr(elem, "radius", 1, &dflex.radius, text);
   ReadAttrInt(elem, "group", &dflex.group);
@@ -1575,7 +1580,7 @@ void mjXReader::OneFlexcomp(XMLElement* elem, mjsBody* body, const mjVFS* vfs) {
   // edge
   XMLElement* edge = FirstChildElement(elem, "edge");
   if (edge) {
-    MapValue(edge, "equality", &fcomp.equality, flexeq_map, 4);
+    MapValue(edge, "equality", &fcomp.equality, flexeq_map, flexeq_sz);
     ReadAttr(edge, "solref", mjNREF, fcomp.def.spec.equality->solref, text, false, false);
     ReadAttr(edge, "solimp", mjNIMP, fcomp.def.spec.equality->solimp, text, false, false);
     ReadAttr(edge, "stiffness", 1, &dflex.edgestiffness, text);
@@ -1589,6 +1594,7 @@ void mjXReader::OneFlexcomp(XMLElement* elem, mjsBody* body, const mjVFS* vfs) {
     ReadAttr(elasticity, "poisson", 1, &dflex.poisson, text);
     ReadAttr(elasticity, "damping", 1, &dflex.damping, text);
     ReadAttr(elasticity, "thickness", 1, &dflex.thickness, text);
+    ReadAttr(elasticity, "yield", 1, &dflex.stressyield, text);
     MapValue(elasticity, "elastic2d", &dflex.elastic2d, elastic2d_map, 4);
     MapValue(elasticity, "section", &dflex.section, flexsection_map, flexsection_sz);
     ReadAttr(elasticity, "sectionsize", 2, dflex.sectionsize, text);

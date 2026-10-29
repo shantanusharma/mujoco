@@ -191,6 +191,9 @@
             .. grid-item::
                :ref:`ipc<option-flag-ipc>`
 
+            .. grid-item::
+               :ref:`speculative<option-flag-speculative>`
+
 
    .. dropdown:: :ref:`compiler<compiler>` |*|
 
@@ -840,6 +843,9 @@
                :ref:`springref<body-joint-springref>`
 
             .. grid-item::
+               :ref:`springyield<body-joint-springyield>`
+
+            .. grid-item::
                :ref:`armature<body-joint-armature>`
 
             .. grid-item::
@@ -967,6 +973,9 @@
 
             .. grid-item::
                :ref:`rgba<body-geom-rgba>`
+
+            .. grid-item::
+               :ref:`castshadow<body-geom-castshadow>`
 
             .. grid-item::
                :ref:`fluidshape<body-geom-fluidshape>`
@@ -1587,6 +1596,9 @@
                   :ref:`thickness<flexcomp-elasticity-thickness>`
 
                .. grid-item::
+                  :ref:`yield<flexcomp-elasticity-yield>`
+
+               .. grid-item::
                   :ref:`elastic2d<flexcomp-elasticity-elastic2d>`
 
                .. grid-item::
@@ -1813,6 +1825,9 @@
 
                .. grid-item::
                   :ref:`thickness<flex-elasticity-thickness>`
+
+               .. grid-item::
+                  :ref:`yield<flex-elasticity-yield>`
 
                .. grid-item::
                   :ref:`elastic2d<flex-elasticity-elastic2d>`
@@ -2103,30 +2118,6 @@
                :ref:`flex<equality-flex-flex>`
 
 
-      .. dropdown:: :ref:`flexvert<equality-flexvert>` |*|
-
-         .. grid:: 2 3 4 4
-            :gutter: 0
-
-            .. grid-item::
-               :ref:`name<equality-flexvert-name>`
-
-            .. grid-item::
-               :ref:`class<equality-flexvert-class>`
-
-            .. grid-item::
-               :ref:`active<equality-flexvert-active>`
-
-            .. grid-item::
-               :ref:`solref<equality-flexvert-solref>`
-
-            .. grid-item::
-               :ref:`solimp<equality-flexvert-solimp>`
-
-            .. grid-item::
-               :ref:`flex<equality-flexvert-flex>`
-
-
       .. dropdown:: :ref:`flexstrain<equality-flexstrain>` |*|
 
          .. grid:: 2 3 4 4
@@ -2200,6 +2191,9 @@
 
             .. grid-item::
                :ref:`springlength<tendon-spatial-springlength>`
+
+            .. grid-item::
+               :ref:`springyield<tendon-spatial-springyield>`
 
             .. grid-item::
                :ref:`width<tendon-spatial-width>`
@@ -2299,6 +2293,9 @@
 
             .. grid-item::
                :ref:`springlength<tendon-fixed-springlength>`
+
+            .. grid-item::
+               :ref:`springyield<tendon-fixed-springyield>`
 
             .. grid-item::
                :ref:`margin<tendon-fixed-margin>`
@@ -5258,6 +5255,9 @@
             .. grid-item::
                :ref:`ctrl<keyframe-key-ctrl>`
 
+            .. grid-item::
+               :ref:`plastic<keyframe-key-plastic>`
+
 
    .. dropdown:: :ref:`visual<visual>` |*|
 
@@ -5715,6 +5715,9 @@
                :ref:`springref<default-joint-springref>`
 
             .. grid-item::
+               :ref:`springyield<default-joint-springyield>`
+
+            .. grid-item::
                :ref:`armature<default-joint-armature>`
 
             .. grid-item::
@@ -5821,6 +5824,9 @@
 
             .. grid-item::
                :ref:`rgba<default-geom-rgba>`
+
+            .. grid-item::
+               :ref:`castshadow<default-geom-castshadow>`
 
             .. grid-item::
                :ref:`fluidshape<default-geom-fluidshape>`
@@ -6073,6 +6079,9 @@
 
             .. grid-item::
                :ref:`springlength<default-tendon-springlength>`
+
+            .. grid-item::
+               :ref:`springyield<default-tendon-springyield>`
 
             .. grid-item::
                :ref:`width<default-tendon-width>`

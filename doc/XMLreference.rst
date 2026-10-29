@@ -795,6 +795,13 @@ from its default.
    commits, so after :ref:`mj_step` they read as under the plain ``discrete`` integrator; a user or plugin sensor
    at the acceleration stage is evaluated twice per step. Inverse dynamics is not supported.
 
+.. _option-flag-speculative:
+
+:at:`speculative`: :at-val:`[disable, enable], "disable"`
+   This flag enables speculative contacts for fast-moving convex geoms, adding contacts before impact to prevent
+   tunneling through thin obstacles within a single timestep. See :ref:`speculative contacts<coSpeculative>` for more
+   details.
+
 .. _compiler:
 
 **compiler** |*|
@@ -2620,6 +2627,24 @@ rotations as unit quaternions.
    corresponding to mjModel.qpos_spring is also used to compute the spring reference lengths of all tendons, stored in
    mjModel.tendon_lengthspring. This is because :ref:`tendons <tendon>` can also have springs.
 
+.. image:: https://www.gstatic.com/mujoco/doc/images/changelog/wire.gif
+   :width: 40%
+   :align: right
+   :target: https://github.com/google-deepmind/mujoco/blob/main/model/plastic/wire.xml
+
+.. _body-joint-springyield:
+
+:at:`springyield`: :at-val:`real, "0"`
+   Elastic yield threshold for the joint spring. Available on slide, hinge, and ball joints (not supported on free
+   joints). For hinge and ball joints, the threshold is specified in degrees or radians depending on the :at:`angle`
+   attribute of :ref:`compiler <compiler>`. When positive, the joint spring reference is allocated in the mutable state
+   vector ``mjData.plastic`` at offset ``mjModel.jnt_plasticadr[j]`` (1 entry for slide/hinge, 4 quaternion entries for
+   ball, initialized from ``mjModel.qpos_spring``) and shifts permanently whenever the spring displacement exceeds
+   ``springyield`` (ideal elasto-plasticity). When ``0`` (default), plasticity is disabled
+   (``mjModel.jnt_plasticadr[j] == -1``) and the spring is purely elastic; setting ``mjModel.jnt_springyield[j] = 0`` at
+   runtime on an already-plastic joint (``jnt_plasticadr[j] >= 0``) corresponds to zero yield threshold (full plastic
+   slip).
+
 .. image:: images/XMLreference/armature.gif
    :width: 40%
    :align: right
@@ -2916,6 +2941,13 @@ helps clarify the role of bodies and geoms in MuJoCo.
    Instead of creating material assets and referencing them, this attribute can be used to set color and transparency
    only. This is not as flexible as the material mechanism, but is more convenient and is often sufficient. If the value
    of this attribute is different from the internal default, it takes precedence over the material.
+
+.. _body-geom-castshadow:
+
+:at:`castshadow`: :at-val:`[false, true], "true"`
+   If this attribute is "true", the geom casts shadows when illuminated by shadow-casting lights (those with
+   :ref:`castshadow<body-light-castshadow>` set to "true"). Setting this to "false" disables shadow casting for this
+   geom while still allowing it to receive shadows and be lit normally.
 
 .. _body-geom-friction:
 
@@ -3451,8 +3483,8 @@ Attributes may be applied or ignored depending on the lighting model being used.
 .. _body-light-castshadow:
 
 :at:`castshadow`: :at-val:`[false, true], "true"`
-   If this attribute is "true" the light will cast shadows. More precisely, the geoms illuminated by the light will cast
-   shadows, however this is a property of lights rather than geoms. Since each shadow-casting light causes one extra
+   If this attribute is "true" the light will cast shadows. More precisely, geoms with
+   :ref:`castshadow<body-geom-castshadow>` enabled that are illuminated by the light will cast shadows. Since each shadow-casting light causes one extra
    rendering pass through all geoms, this attribute should be used with caution. Higher quality of the shadows is
    achieved by increasing the value of the shadowsize attribute of :ref:`quality <visual-quality>`, as well as
    positioning spotlights closer to the surface on which shadows appear, and limiting the volume in which shadows are
@@ -3983,6 +4015,11 @@ saving the XML:
    Note that a higher interpolation order generally requires a smaller time step for stability, although usually not as
    large as with the "full" option and a fine mesh.
 
+   For **full**, **trilinear**, and **quadratic** parametrizations (with ``rigid="false"``), the generated vertex or
+   node child bodies already carry 3 orthogonal translational slide joints. Unless at least one active vertex or node is
+   :ref:`pinned<flexcomp-pin>` to the parent body, the parent body (and its ancestor bodies) must not have a
+   ``<freejoint/>`` or other joints.
+
 .. _body-flexcomp-type:
 
 :at:`type`: :at-val:`[grid, box, cylinder, ellipsoid, disc, circle, mesh, gmsh, direct], "grid"`
@@ -4055,7 +4092,9 @@ saving the XML:
 
 :at:`cellcount`: :at-val:`int(3), "1 1 1"`
    Specifies the number of cells in each dimension for the background interpolation grid when using **trilinear** or
-   **quadratic** dofs.
+   **quadratic** dofs. Compilation and simulation cost scale with ``cellcount`` and the interpolation order
+   (:ref:`dof<body-flexcomp-dof>`); compiled cell stiffness and cut-cell quadrature weights are cached across
+   recompilations.
 
 .. _body-flexcomp-spacing:
 
@@ -4204,12 +4243,11 @@ element is used to adjust the properties of all edges in the flex.
 
 .. _flexcomp-edge-equality:
 
-:at:`equality`: :at-val:`[false, true, vert, strain], "false"`
+:at:`equality`: :at-val:`[false, true, strain], "false"`
    The type of equality constraint applied to this edge. If :at-val:`false`, no equality constraint is applied. If
-   :at-val:`true`, then edge constraints are enforced. If :at-val:`vert`, an averaged constraint is used, see
-   :ref:`flexvert<equality-flexvert>`. if :at-val:`strain`, then a constraint is added to enforce that the invariants of
-   the strain tensor do not change; this is only equality constraint type supported for trilinear and quadratic
-   :ref:`dofs<body-flexcomp-dof>` elements and :ref:`here<equality-flexstrain>`.
+   :at-val:`true`, then edge constraints are enforced. If :at-val:`strain`, then a constraint is added to enforce that the
+   invariants of the strain tensor do not change; this is the only equality constraint type supported for trilinear and
+   quadratic :ref:`dofs<body-flexcomp-dof>` elements, see :ref:`here<equality-flexstrain>`.
 
 .. _flexcomp-edge-solref:
 .. _flexcomp-edge-solimp:
@@ -4233,12 +4271,13 @@ element is used to adjust the properties of all edges in the flex.
 .. _flexcomp-elasticity-poisson:
 .. _flexcomp-elasticity-damping:
 .. _flexcomp-elasticity-thickness:
+.. _flexcomp-elasticity-yield:
 .. _flexcomp-elasticity-elastic2d:
 .. _flexcomp-elasticity-section:
 .. _flexcomp-elasticity-sectionsize:
 
 .. |body/flexcomp/elasticity attrib list| replace::
-   :at:`young`, :at:`poisson`, :at:`damping`, :at:`thickness`, :at:`elastic2d`, :at:`section`, :at:`sectionsize`
+   :at:`young`, :at:`poisson`, :at:`damping`, :at:`thickness`, :at:`yield`, :at:`elastic2d`, :at:`section`, :at:`sectionsize`
 
 |body/flexcomp/elasticity attrib list|
    Same as in :ref:`flex/elasticity<flex-elasticity>`.
@@ -4785,17 +4824,23 @@ For 1D flexes, elasticity is a twist-free, isotropic `discrete elastic rod
 :ref:`section<flex-elasticity-section>`. Every vertex shared by exactly two edges stores the energy
 :math:`k |\kappa b|^2`, where :math:`\kappa b` is the discrete curvature binormal and
 :math:`k = E I / (\ell_0 + \ell_1)`, with :math:`I` the second moment of area of the cross-section and
-:math:`\ell_{0,1}` the reference lengths of the two edges. The reference configuration ``qpos0`` must be straight: a
-compiler error is raised if any such vertex is bent by more than :math:`10^{-4}` rad, since without material frames an
-isotropic rod with a curved reference would only resist the magnitude of its curvature, not its direction. A curved
-initial pose, e.g. coiled or draped, can be set with ``qpos`` or a :ref:`keyframe<keyframe>`; the rod then starts with
-stored bending energy and is pushed toward straightening. Rods with a curved rest shape, such as coil springs, can use
-the :ref:`cable<CComposite>` composite instead. Twist is assumed to relax instantly, which is exact unless the
-orientation of both ends of the rod is constrained. Stretching is not included; use :ref:`edge<flex-edge>` constraints
-(or edge stiffness under integrators other than ``discrete``) instead. Rod bending is integrated implicitly by the
-:ref:`discrete<option-integrator>` integrator, using a positive semi-definite approximation of its Hessian, and
-explicitly by ``Euler`` and ``RK4`` (not supported under ``implicit`` and ``implicitfast``). It is not supported by
-:ref:`dof<body-flexcomp-dof>` **trilinear** and **quadratic**.
+:math:`\ell_{0,1}` the reference lengths of the two edges. Vertices bent by more than :math:`10^{-4}` rad in the
+reference configuration ``qpos0`` keep their reference curvature, so that a rod with a curved reference, such as a ring
+or an arc, is at rest in that shape. A bent vertex without bent neighbors stores
+:math:`k (|\kappa b| - |\kappa b_0|)^2`, with :math:`\kappa b_0` the reference binormal, so only its curvature magnitude
+is held and its bending plane is free. Without material frames, the binormals of adjacent bent vertices are compared in
+pairs with their reference values, up to a common rotation about the shared edge, so the rod has no torsional
+stiffness: it resists changes in curvature magnitude, but a curved rod can deform out of its plane at constant curvature
+(e.g. an arc can coil into a helix) with a resistance that vanishes as the discretization is refined. Rods with
+torsional stiffness, such as coil springs, can use the :ref:`cable<CComposite>` composite instead. Vertices bent by less
+than :math:`10^{-4}` rad are treated as straight; a curved initial pose of a straight rod, e.g. coiled or draped, can be
+set with ``qpos`` or a :ref:`keyframe<keyframe>`, and the rod then starts with stored bending energy. Twist is assumed
+to relax instantly, which is exact for a straight reference unless the orientation of both ends of the rod is
+constrained. Stretching is not included; use :ref:`edge<flex-edge>` constraints (or edge stiffness under integrators
+other than ``discrete``) instead. Rod bending is integrated implicitly by the :ref:`discrete<option-integrator>`
+integrator, using a positive semi-definite approximation of its Hessian, and explicitly by ``Euler`` and ``RK4`` (not
+supported under ``implicit`` and ``implicitfast``). It is not supported by :ref:`dof<body-flexcomp-dof>` **trilinear**
+and **quadratic**.
 
 .. _flex-elasticity-young:
 
@@ -4822,6 +4867,19 @@ explicitly by ``Euler`` and ``RK4`` (not supported under ``implicit`` and ``impl
    Shell thickness, units of length; only for used 2D flexes. Used to scale the stretching stiffness.
    This thickness can be set equal to 2 times the :ref:`radius <deformable-flex-radius>` in order to match the geometry,
    but is exposed separately since the radius might be constrained by considerations related to collision detection.
+
+.. image:: https://www.gstatic.com/mujoco/doc/images/changelog/clay.gif
+   :width: 40%
+   :align: right
+   :target: https://github.com/google-deepmind/mujoco/blob/main/model/flex/clay.xml
+
+.. _flex-elasticity-yield:
+
+:at:`yield`: :at-val:`real(1), "0"`
+   Dimensionless plastic yield strain threshold :math:`\varepsilon_y` for non-interpolated 2D and 3D flexes. If zero,
+   the flex is purely elastic. If positive, each element's elastic stretching strain tensor is bounded by the von Mises
+   (:math:`J_2`) yield criterion (3D isochoric in 3D, plane-stress with out-of-plane thinning in tension in 2D) via
+   radial return mapping.
 
 .. _flex-elasticity-elastic2d:
 
@@ -5370,32 +5428,6 @@ as there are edges in the specified flex. See `this model
    Name of the flex whose edges are being constrained.
 
 
-.. _equality-flexvert:
-
-:el-prefix:`equality/` |-| **flexvert** |*|
-^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-
-This element constrains the trace and the derminant of the strain tensor to that of the identity matrix as in Chen, Kry,
-and Vouga, "Locking-free Simulation of Isometric Thin Plates", 2019. The strain tensor is computed per triangle and
-averaged over all triangles adjacent to a vertex. This reduces the number of constraints from 2T to 2V, freeing V
-degrees of freedom to avoid locking. It is only supported for dimension 2, i.e., cloth-like flexes. See `this model
-<https://github.com/google-deepmind/mujoco/blob/main/model/flex/poncho.xml>`__ for an example.
-
-.. _equality-flexvert-name:
-.. _equality-flexvert-class:
-.. _equality-flexvert-active:
-.. _equality-flexvert-solref:
-.. _equality-flexvert-solimp:
-
-:at:`name`, :at:`class`, :at:`active`, :at:`solref`, :at:`solimp`
-   Same as in :ref:`connect <equality-connect>` element.
-
-.. _equality-flexvert-flex:
-
-:at:`flex`: :at-val:`string, required`
-   Name of the flex whose vertices are being constrained.
-
-
 .. _equality-flexstrain:
 
 :el-prefix:`equality/` |-| **flexstrain** |*|
@@ -5606,6 +5638,18 @@ length X, as in the clip on the right of `this example model
    The clip on the right is of
    `this model <https://github.com/google-deepmind/mujoco/blob/main/test/engine/testdata/passive/poly_stiffness.xml>`__.
 
+.. _tendon-spatial-springyield:
+
+:at:`springyield`: :at-val:`real, "0"`
+   Elastic yield threshold for the tendon spring. When positive, the tendon spring reference range is allocated in the
+   mutable state vector ``mjData.plastic`` at offset ``mjModel.tendon_plasticadr[i]`` (2 entries, initialized from
+   ``mjModel.tendon_lengthspring``) and shifts permanently whenever the displacement outside the spring deadband exceeds
+   ``springyield`` (ideal elasto-plasticity). For unilateral slack tendons with ``springlength="0 L"`` (``L > 0``),
+   tensile yielding shifts only the upper bound ``L`` while keeping the lower bound pinned at ``0``. When ``0``
+   (default), plasticity is disabled (``mjModel.tendon_plasticadr[i] == -1``) and the spring is purely elastic; setting
+   ``mjModel.tendon_springyield[i] = 0`` at runtime on an already-plastic tendon (``tendon_plasticadr[i] >= 0``)
+   corresponds to zero yield threshold (full plastic slip).
+
 .. _tendon-spatial-damping:
 
 :at:`damping`: :at-val:`real, "0 0 0"`
@@ -5753,6 +5797,8 @@ as above.
 
 .. _tendon-fixed-stiffness:
 
+.. _tendon-fixed-springyield:
+
 .. _tendon-fixed-damping:
 
 .. _tendon-fixed-armature:
@@ -5762,7 +5808,7 @@ as above.
 .. |tendon/fixed attrib list| replace::
    :at:`name`, :at:`class`, :at:`group`, :at:`limited`, :at:`range`, :at:`solreflimit`, :at:`solimplimit`,
    :at:`solreffriction`, :at:`solimpfriction`, :at:`frictionloss`, :at:`margin`, :at:`springlength`, :at:`stiffness`,
-   :at:`damping`, :at:`user`
+   :at:`springyield`, :at:`damping`, :at:`user`
 
 |tendon/fixed attrib list|
    Same as in the :ref:`spatial <tendon-spatial>` element.
@@ -9758,6 +9804,11 @@ be set to their values in the default configuration.
 :at:`mquat`: :at-val:`real(4*mjModel.nmocap), default = mjModel.body_quat`
    Vector of mocap body quaternions, copied into mjData.mocap_quat when the simulation state is set to this keyframe.
 
+.. _keyframe-key-plastic:
+
+:at:`plastic`: :at-val:`real(mjModel.nplastic), default = initial plastic state`
+   Vector of plastic states, copied into mjData.plastic when the simulation state is set to this keyframe.
+
 
 
 .. _visual:
@@ -10438,6 +10489,8 @@ if omitted.
 
 .. _default-joint-springref:
 
+.. _default-joint-springyield:
+
 .. _default-joint-armature:
 
 .. _default-joint-damping:
@@ -10514,6 +10567,8 @@ if omitted.
 .. _default-geom-fitscale:
 
 .. _default-geom-rgba:
+
+.. _default-geom-castshadow:
 
 .. _default-geom-fluidshape:
 
@@ -10726,6 +10781,8 @@ if omitted.
 .. _default-tendon-margin:
 
 .. _default-tendon-stiffness:
+
+.. _default-tendon-springyield:
 
 .. _default-tendon-damping:
 

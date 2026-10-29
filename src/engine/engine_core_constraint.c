@@ -498,7 +498,6 @@ void mj_instantiateEquality(const mjModel* m, mjData* d) {
   int issparse = mj_isSparse(m), nv = m->nv;
   int id[2], size, NV, NV2, *chain = NULL, *chain2 = NULL;
   int flex_edgeadr, flex_edgenum;
-  int flex_vertadr, flex_vertnum;
   mjtNum cpos[6], pos[2][3], ref[2], dif, deriv;
   mjtNum quat[4], quat1[4], quat2[4], quat3[4], axis[3];
   mjtNum *jac[2], *jacdif, *data;
@@ -910,35 +909,6 @@ void mj_instantiateEquality(const mjModel* m, mjData* d) {
       }
     }
     break;
-
-    case mjEQ_FLEXVERT:
-      // add two constraints per vertex
-      flex_vertadr = m->flex_vertadr[id[0]];
-      flex_vertnum = m->flex_vertnum[id[0]];
-      for (int v=flex_vertadr; v < flex_vertadr+flex_vertnum; v++) {
-        for (int j=0; j < 2; j++) {
-          int row = 2*v+j;
-          if (!m->flexvert_J_rownnz[row]) {
-            continue;
-          }
-          cpos[0] = d->flexvert_length[row];
-          if (issparse) {
-            mj_addConstraint(m, d, d->flexvert_J + m->flexvert_J_rowadr[row],
-                             cpos, 0, 0, 1, mjCNSTR_EQUALITY, i,
-                             m->flexvert_J_rownnz[row],
-                             m->flexvert_J_colind + m->flexvert_J_rowadr[row]);
-          } else {
-            mju_zero(jac[0], nv);  // reuse first row of jac[0]
-            int rowadr = m->flexvert_J_rowadr[row];
-            int rownnz = m->flexvert_J_rownnz[row];
-            for (int k=0; k<rownnz; k++) {
-              jac[0][m->flexvert_J_colind[rowadr+k]] = d->flexvert_J[rowadr+k];
-            }
-            mj_addConstraint(m, d, jac[0], cpos, 0, 0, 1, mjCNSTR_EQUALITY, i, 0, NULL);
-          }
-        }
-      }
-      break;
 
     default:                    // SHOULD NOT OCCUR
       mjERROR("invalid equality constraint type %d", m->eq_type[i]);
@@ -1677,48 +1647,6 @@ void mj_diagApprox(const mjModel* m, mjData* d) {
         i--;
         break;
 
-      case mjEQ_FLEXVERT:
-        // process all non-rigid vertices for this flex
-        f = m->eq_obj1id[id];
-        int vertadr = m->flex_vertadr[f];
-        int vertnum = m->flex_vertnum[f];
-        for (int v=vertadr; v<vertadr+vertnum; v++) {
-          if (!m->flexvert_J_rownnz[2*v+0] && !m->flexvert_J_rownnz[2*v+1]) {
-            continue;
-          }
-          int bodyid = m->flex_vertbodyid[v];
-          mjtNum invweight = m->body_invweight0[2*bodyid];
-          if (invweight == 0) {
-            int nedge = m->flex_vertedgenum[v];
-            int edgeadr = m->flex_vertedgeadr[v];
-            int ebase = m->flex_edgeadr[f];
-            int n = 0;
-            for (int k=0; k<nedge; k++) {
-              int e = m->flex_vertedge[edgeadr+k];
-              int v1 = m->flex_edge[2*(ebase+e)];
-              int v2 = m->flex_edge[2*(ebase+e)+1];
-              int nb = m->flex_vertbodyid[vertadr + (v == vertadr+v1 ? v2 : v1)];
-              if (m->body_invweight0[2*nb] > 0) {
-                invweight += m->body_invweight0[2*nb];
-                n++;
-              }
-            }
-            if (n > 0) {
-              invweight /= n;
-            }
-          }
-          if (m->flexvert_J_rownnz[2*v+0]) {
-            dA[i++] = invweight;
-          }
-          if (m->flexvert_J_rownnz[2*v+1]) {
-            dA[i++] = invweight;
-          }
-        }
-
-        // adjust constraint counter
-        i--;
-        break;
-
       case mjEQ_FLEXSTRAIN: {
         // strain constraints: use avg inv weight of element's nodes
         int flex_id = m->eq_obj1id[id];
@@ -2419,10 +2347,6 @@ static int mj_ne(const mjModel* m, mjData* d, int* nnz) {
       }
       break;
 
-    case mjEQ_FLEXVERT:
-      size = mj_flexvertRows(m, id[0], nnz ? &NV : NULL);
-      break;
-
     case mjEQ_FLEXSTRAIN: {
       // per-element strain constraints: each equality is one cell or face
       int f = id[0];
@@ -2489,8 +2413,7 @@ static int mj_ne(const mjModel* m, mjData* d, int* nnz) {
 
     // accumulate counts; flex NV already accumulated
     ne += mj_addConstraintCount(m, size, NV);
-    if (m->eq_type[i] == mjEQ_FLEX || m->eq_type[i] == mjEQ_FLEXVERT ||
-        m->eq_type[i] == mjEQ_FLEXSTRAIN) {
+    if (m->eq_type[i] == mjEQ_FLEX || m->eq_type[i] == mjEQ_FLEXSTRAIN) {
       nnze += NV;
     } else {
       nnze += size*NV;
@@ -3184,9 +3107,9 @@ void mj_projectConstraint(const mjModel* m, mjData* d) {
 }
 
 
-// add relative surface velocity of contacting geoms to contact rows of efc_vel
+// add relative surface velocity of contacts to contact rows of efc_vel
 static void mj_addSurfaceVel(const mjModel* m, mjData* d) {
-  // no surface velocity on any geom: quick return
+  // no surface velocity: quick return
   if (!m->flg_surfacevel) {
     return;
   }
@@ -3196,64 +3119,33 @@ static void mj_addSurfaceVel(const mjModel* m, mjData* d) {
 
   // loop over contacts, add surface velocity to efc_vel
   for (int i=0; i < ncon; i++) {
-    // get contact, skip excluded
+    // get contact, skip excluded or frictionless
     const mjContact* con = d->contact + i;
-    if (con->efc_address < 0) { continue; }
-
-    // relative surface velocity in world frame: geom2 minus geom1, linear and angular
-    mjtNum svel[3] = {0, 0, 0}, sang[3] = {0, 0, 0};
-    int active = 0;
-    for (int side=0; side < 2; side++) {
-      int g = con->geom[side];
-      if (g < 0) {
-        // TODO(team): support flex
-        continue;
-      }
-      const mjtNum* sv = m->geom_surfacevel + 6*g;
-
-      // skip geom with no surface velocity
-      if (!sv[0] && !sv[1] && !sv[2] && !sv[3] && !sv[4] && !sv[5]) {
-        continue;
-      }
-      active = 1;
-
-      // rotate to world frame, add angular contribution at contact point
-      mjtNum sgn = side ? 1 : -1;
-      mjtNum vw[3], ww[3];
-      mj_geomSurfaceVelocity(m, d, g, con->pos, vw, ww);
-      mju_addToScl3(svel, vw, sgn);
-      mju_addToScl3(sang, ww, sgn);
-    }
-    if (!active) {
+    if (con->efc_address < 0 || con->dim <= 1) {
       continue;
     }
 
-    // rotate to contact frame: (normal, tangent1, tangent2, spin, roll1, roll2)
-    mjtNum cs[6];
-    mju_mulMatVec3(cs, con->frame, svel);
-    mju_mulMatVec3(cs + 3, con->frame, sang);
+    // skip contact with no surface velocity
+    const mjtNum* sv = con->surfacevel;
+    if (!sv[0] && !sv[1] && !sv[2]) {
+      continue;
+    }
 
-    // surface velocity acts in the tangent plane and torsional direction only
-    cs[0] = 0;  // no normal push
-    cs[4] = 0;  // no rolling drive
-    cs[5] = 0;  // no rolling drive
-
-    // add to contact rows
-    int adr = con->efc_address, dim = con->dim;
-    if (dim == 1 || !ispyramid) {
-      for (int j=0; j < dim; j++) {
-        d->efc_vel[adr + j] += cs[j];
+    // add to contact rows: (tangent1, tangent2, spin) map to directions k = 1, 2, 3
+    int adr = con->efc_address, n = mjMIN(con->dim, 4);
+    if (!ispyramid) {
+      for (int k=1; k < n; k++) {
+        d->efc_vel[adr + k] += sv[k-1];
       }
     } else {
-      for (int k=1; k < dim; k++) {
+      for (int k=1; k < n; k++) {
         mjtNum mu = con->friction[k-1];
-        d->efc_vel[adr + 2*(k-1)]     += cs[0] + mu*cs[k];
-        d->efc_vel[adr + 2*(k-1) + 1] += cs[0] - mu*cs[k];
+        d->efc_vel[adr + 2*(k-1)]     += mu*sv[k-1];
+        d->efc_vel[adr + 2*(k-1) + 1] -= mu*sv[k-1];
       }
     }
   }
 }
-
 
 
 // bias aref of adhesive contact rows: makes the compression branch of the net
