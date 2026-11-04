@@ -11,10 +11,10 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Temporary input (e.g., keyboard, mouse) handling functions for ViewerApp."""
+"""Temporary input (e.g., keyboard, mouse) handling functions for Studio app."""
 
 # TODO(matijak): These free functions implement the keyboard and mouse event
-# handling for Studio. They are separated from the main ViewerApp class to
+# handling for Studio. They are separated from the main App class to
 # clarify the long-term API and avoid cluttering it with a large amount of
 # temporary code. When studio/platform has a proper API for registering key
 # bindings and mouse behaviour, the event handling functions will delegate to
@@ -561,13 +561,13 @@ def handle_mouse_events(
       elif imgui.IsMouseDown(imgui.MouseButton.Middle):
         action = int(mujoco.mjtMouse.mjMOUSE_ZOOM)
 
+      move_actions = (
+          int(mujoco.mjtMouse.mjMOUSE_MOVE_V),
+          int(mujoco.mjtMouse.mjMOUSE_MOVE_H),
+      )
       active = int(
           mujoco.mjtPertBit.mjPERT_TRANSLATE
-          if action
-          in (
-              int(mujoco.mjtMouse.mjMOUSE_MOVE_V),
-              int(mujoco.mjtMouse.mjMOUSE_MOVE_H),
-          )
+          if action in move_actions
           else mujoco.mjtPertBit.mjPERT_ROTATE
       )
       if active != perturb.active:

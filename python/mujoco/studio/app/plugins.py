@@ -17,9 +17,9 @@ The class can be used as a plugin to run the full Studio Viewer application in
 Python.
 
 Architecture:
-  ViewerApp provides the full default UI/UX as a viewer-side plugin. This class
-  is viewer-agnostic and as such does not own camera, vis_options, or perturb
-  objects (these are provided by the viewer).
+  App provides the full default UI/UX as a viewer-side plugin. This
+  class is viewer-agnostic and as such does not own camera, vis_options, or
+  perturb objects (these are provided by the viewer).
 
   Viewer classes (NativeViewer and WebViewer) own the renderer, camera,
   vis_options, and local deep-copied model/data used for rendering. The sim side
@@ -46,9 +46,8 @@ from mujoco.studio import sim
 from mujoco.studio import sim_history
 from mujoco.studio import step_control
 from mujoco.studio import ux
-from mujoco.studio import viewer_app_events
-from mujoco.studio import viewer_protocol
 from mujoco.studio import viewer_utils
+from mujoco.studio.app import inputs
 
 from mujoco.studio.dear_imgui import dear_imgui as imgui
 
@@ -112,6 +111,7 @@ class _ConsoleHooks:
       file: Any = None,
       line: str | None = None,
   ) -> None:
+    """Forwards warnings to the Studio Console and original hook."""
     if file is None or file is sys.stderr:
       ux.add_console_message(
           int(mujoco.mjtLogLevel.mjLOG_WARNING),
@@ -120,6 +120,7 @@ class _ConsoleHooks:
     self.orig_showwarning(message, category, filename, lineno, file, line)
 
   def threading_excepthook(self, args: threading.ExceptHookArgs) -> None:
+    """Forwards thread exceptions to the Studio Console and original hook."""
     if args.exc_type is not SystemExit:
       thread_name = args.thread.name if args.thread else 'unknown'
       tb = ''.join(
@@ -174,7 +175,7 @@ def install_console_hooks() -> None:
       warnings.filterwarnings(
           'always',
           category=UserWarning,
-          module=re.escape(__name__.rpartition('.')[0] + '.parser'),
+          module=re.escape(messages.__name__.rpartition('.')[0] + '.parser'),
       )
       _hooks = _ConsoleHooks()
       warnings.showwarning = _hooks.showwarning
@@ -192,23 +193,23 @@ def install_console_hooks() -> None:
 
 
 @dataclasses.dataclass(frozen=True)
-class ViewerAppInitEvent(messages.Event):
-  """Lifecycle event dispatched once when the ViewerApp is initialised.
+class InitEvent(messages.Event):
+  """Lifecycle event dispatched once when the studio_app App is initialised.
 
-  Plugins that need access to the ViewerApp should handle this event and cache
-  the reference.
+  Plugins that need access to the studio_app App should handle this event
+  and cache the reference.
   """
 
-  viewer_app: 'ViewerApp'
+  app: 'App'
 
 
 @dataclasses.dataclass
-class ViewerAppConfig:
-  """Configures the ViewerApp.
+class Config:
+  """Configures the studio_app App.
 
-  Pass an instance to ViewerApp to choose what is visible on startup. The
-  ViewerApp keeps the instance as its live UI state, so the View menu and the
-  keyboard shortcuts toggle these same fields.
+  Pass an instance to App to choose what is visible on startup. The App keeps
+  the instance as its live UI state, so the View menu and the keyboard
+  shortcuts toggle these same fields.
   """
 
   show_info: bool = False
@@ -216,21 +217,22 @@ class ViewerAppConfig:
   show_console: bool = False
   show_options: bool = True
   show_toolbar: bool = False
+  show_view_gizmo: bool = True
   show_status_bar: bool = True
   show_inspector: bool = True
 
 
-# Sim-side plugins that back ViewerApp's step control and history scrubbing UI.
-# Unpack alongside ViewerApp() in plugins=[...], or pass individual plugins
-# when replacing one (e.g. a custom StepEvent plugin).
+# Sim-side plugins that back App's step control and history scrubbing UI.
+# Unpack alongside App() in plugins=[...], or pass individual plugins when
+# replacing one (e.g. a custom StepEvent plugin).
 SIM_PLUGINS: tuple[plugin.SimPlugin, ...] = (
     step_control.StepControl(),
     sim_history.SimHistory(),
 )
 
 
-class ViewerApp(plugin.ViewerPlugin):
-  """ViewerApp wraps a Viewer and adds Studio UI/UX.
+class App(plugin.ViewerPlugin):
+  """Wraps a Viewer and adds Studio UI/UX.
 
   Pair with ``*SIM_PLUGINS`` in ``plugins=[...]`` for the default sim-side
   real-time CPU stepping and history scrubbing.
@@ -260,11 +262,11 @@ class ViewerApp(plugin.ViewerPlugin):
   def data(self, value: mujoco.MjData) -> None:
     self.viewer.data = value
 
-  def __init__(self, config: ViewerAppConfig | None = None) -> None:
+  def __init__(self, config: Config | None = None) -> None:
     install_console_hooks()
     self._model_path: str = ''
     self.theme = ux.load_theme()
-    self.config = config or ViewerAppConfig()
+    self.config = config or Config()
     self.status = 'Ready'
     self._reset_app_state()
 
@@ -275,17 +277,17 @@ class ViewerApp(plugin.ViewerPlugin):
     self.theme = ux.load_settings(def_theme=self.theme)
     ux.setup_theme(self.theme)
     self.align_camera()
-    self.viewer.dispatch(ViewerAppInitEvent(viewer_app=self))
+    self.viewer.dispatch(InitEvent(app=self))
 
   def _reset_app_state(self) -> None:
-    """Resets ViewerApp-specific state (step control, ux)."""
+    """Resets studio_app state (step control, ux)."""
     self.step_control_state = sim.StepControl()
     self.ux_state = ux.UxState()
     if self._viewer is not None:
       self.align_camera()
 
   def _reload_app_state(self, model: mujoco.MjModel) -> None:
-    """Reloads ViewerApp state, keeping step control, speed, and camera."""
+    """Reloads studio_app state, keeping step control, speed, and camera."""
     old = self.ux_state
     self.ux_state = ux.UxState()
     self.ux_state.speed_index = old.speed_index
@@ -321,6 +323,11 @@ class ViewerApp(plugin.ViewerPlugin):
       )
     else:
       mujoco.mjv_defaultFreeCamera(self.model, self.viewer.camera)
+      if self.ux_state.camera_index not in (
+          ux.TUMBLE_CAMERA_IDX,
+          ux.FREE_CAMERA_IDX,
+      ):
+        self.ux_state.camera_index = ux.TUMBLE_CAMERA_IDX
 
   def reload_model(self) -> None:
     """Asks the sim to reload the current model from its file."""
@@ -338,38 +345,36 @@ class ViewerApp(plugin.ViewerPlugin):
     """Handles keyboard events."""
 
     is_freecam_wasd = self.ux_state.camera_index == ux.FREE_CAMERA_IDX
-    if viewer_app_events.handle_step_control_keyboard_events(
+    if inputs.handle_step_control_keyboard_events(
         self.step_control_state, self.ux_state
     ):
       return
 
-    if viewer_app_events.handle_sim_history_keyboard_events(
+    if inputs.handle_sim_history_keyboard_events(
         self.step_control_state, self.ux_state
     ):
       return
 
-    if viewer_app_events.handle_reset_keyboard_events(self.model, self.data):
+    if inputs.handle_reset_keyboard_events(self.model, self.data):
       self.reset_physics()
       return
 
-    if viewer_app_events.handle_camera_select_keyboard_events(
+    if inputs.handle_camera_select_keyboard_events(
         self.model, self.viewer.camera, self.ux_state
     ):
       return
 
-    if viewer_app_events.handle_vis_options_keyboard_events(
+    if inputs.handle_vis_options_keyboard_events(
         self.viewer.vis_options, is_freecam_wasd
     ):
       return
 
-    if viewer_app_events.handle_miscellaneous_keyboard_events(self):
+    if inputs.handle_miscellaneous_keyboard_events(self):
       return
 
     if is_freecam_wasd:
-      handled, cam_speed = (
-          viewer_app_events.handle_freecam_wasd_keyboard_events(
-              self.model, self.data, self.viewer.camera, self.viewer.cam_speed
-          )
+      handled, cam_speed = inputs.handle_freecam_wasd_keyboard_events(
+          self.model, self.data, self.viewer.camera, self.viewer.cam_speed
       )
       if handled:
         self.viewer.cam_speed = cam_speed
@@ -377,7 +382,7 @@ class ViewerApp(plugin.ViewerPlugin):
 
   def handle_camera_tracking_mouse_events(self) -> None:
     """Handles mouse events for camera tracking."""
-    return viewer_app_events.handle_camera_tracking_mouse_events(
+    return inputs.handle_camera_tracking_mouse_events(
         self.model,
         self.data,
         self.viewer.camera,
@@ -389,7 +394,7 @@ class ViewerApp(plugin.ViewerPlugin):
       self,
   ) -> None:
     """Handles mouse events."""
-    return viewer_app_events.handle_mouse_events(
+    return inputs.handle_mouse_events(
         self.model,
         self.data,
         self.viewer.camera,
@@ -479,9 +484,9 @@ class ViewerApp(plugin.ViewerPlugin):
     # TODO(matijak): Consider adding a PreBuildGuiEvent and moving the theme and
     # dockspace setup below into a handler for it. That would guarantee the
     # dockspace exists before any plugin's BuildGuiEvent handler submits
-    # windows, instead of relying on ViewerApp's Priority.CRITICAL.
+    # windows, instead of relying on App's Priority.CRITICAL.
     ux.setup_theme(self.theme)
-    ux.configure_docking_layout(
+    workspace_rect = ux.configure_docking_layout(
         show_toolbar=self.config.show_toolbar,
         show_status_bar=self.config.show_status_bar,
     )
@@ -516,6 +521,8 @@ class ViewerApp(plugin.ViewerPlugin):
             self.config.show_inspector = not self.config.show_inspector
           if imgui.MenuItem('Toolbar', '', self.config.show_toolbar):
             self.config.show_toolbar = not self.config.show_toolbar
+          if imgui.MenuItem('View Gizmo', '', self.config.show_view_gizmo):
+            self.config.show_view_gizmo = not self.config.show_view_gizmo
           if imgui.MenuItem('Status Bar', '', self.config.show_status_bar):
             self.config.show_status_bar = not self.config.show_status_bar
           imgui.Separator()
@@ -568,6 +575,16 @@ class ViewerApp(plugin.ViewerPlugin):
             imgui.EndTable()
           imgui.PopStyleVar()
         imgui.End()
+
+      # -- View gizmo ---------------------------------------------------------
+      if self.config.show_view_gizmo:
+        ux.view_gizmo_gui(
+            self.model,
+            self.data,
+            self.viewer.camera,
+            self.ux_state,
+            workspace_rect,
+        )
 
       # -- Left pane: Options -------------------------------------------------
       node_flags = int(imgui.TreeNodeFlags.SpanAvailWidth) | int(

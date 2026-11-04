@@ -125,7 +125,7 @@ typedef struct mjData_ {
   int     nJ;                // number of non-zeros in constraint Jacobian
 
   // effective metric: per-step activity flag and sizes, set by mj_effBuild
-  int     efm_active;        // implicit effective metric M+K is active (see mj_effBuild)
+  int     efm_active;        // effective metric M+K: 0 off, 1 on, 2 on with general flex CSR
   int     nefmK;             // number of non-zeros in effective-stiffness CSR
   int     nefmcon;           // packed length of the contact rank-1 rows
   int     nefmT;             // number of tendons with terms in the metric
@@ -204,12 +204,15 @@ typedef struct mjData_ {
   mjtNum* xquat;             // Cartesian orientation of body frame              (nbody x 4)
   mjtNum* xmat;              // Cartesian orientation of body frame              (nbody x 9)
   mjtNum* xipos;             // Cartesian position of body com                   (nbody x 3)
+  mjtNum* xiquat;            // Cartesian orientation of body inertia            (nbody x 4)
   mjtNum* ximat;             // Cartesian orientation of body inertia            (nbody x 9)
   mjtNum* xanchor;           // Cartesian position of joint anchor               (njnt x 3)
   mjtNum* xaxis;             // Cartesian joint axis                             (njnt x 3)
   mjtNum* geom_xpos;         // Cartesian geom position                          (ngeom x 3)
+  mjtNum* geom_xquat;        // Cartesian geom orientation                       (ngeom x 4)
   mjtNum* geom_xmat;         // Cartesian geom orientation                       (ngeom x 9)
   mjtNum* site_xpos;         // Cartesian site position                          (nsite x 3)
+  mjtNum* site_xquat;        // Cartesian site orientation                       (nsite x 4)
   mjtNum* site_xmat;         // Cartesian site orientation                       (nsite x 9)
   mjtNum* cam_xpos;          // Cartesian camera position                        (ncam x 3)
   mjtNum* cam_xmat;          // Cartesian camera orientation                     (ncam x 9)
@@ -941,6 +944,7 @@ typedef struct mjModel_ {
   int*      flex_elemedgeadr;     // first element edge id address            (nflex x 1)
   int*      flex_bendingadr;      // first bending data address               (nflex x 1)
   int*      flex_plasticadr;      // plastic state address; -1: elastic       (nflex x 1)
+  int*      flex_plasticmode;     // plastic state bits; 1: bend, 2: stretch  (nflex x 1)
   int*      flex_shellnum;        // number of shells                         (nflex x 1)
   int*      flex_shelldataadr;    // first shell data address                 (nflex x 1)
   int*      flex_texcoordadr;     // address in flex_texcoord; -1: none       (nflex x 1)
@@ -971,7 +975,7 @@ typedef struct mjModel_ {
   mjtNum*   efm0_L;               // factor of M + (dt^2+dt*d)*K_bend         (nefm0L x 1)
   int*      efmC_perm;            // sparse factor order: vertex dof or -1    (nefmCvert x 1)
   mjtNum*   flex_damping;         // Rayleigh's damping coefficient           (nflex x 1)
-  mjtNum*   flex_yield;           // yield strain threshold; 0: elastic       (nflex x 1)
+  mjtNum*   flex_yield;           // yield strain (stretch, bend); 0: elastic (nflex x 2)
   mjtNum*   flex_edgestiffness;   // edge stiffness                           (nflex x 1)
   mjtNum*   flex_edgedamping;     // edge damping                             (nflex x 1)
   int*      flex_edgeequality;    // 0:none, 1:edges, 3:strain                (nflex x 1)
@@ -2141,9 +2145,10 @@ typedef struct mjsFlex_ {          // flex specification
   mjStringVec* material;           // name of material used for rendering
   double young;                    // Young's modulus
   double poisson;                  // Poisson's ratio
+  double shear;                    // 1D torsion shear modulus; 0: young / (2 (1 + poisson))
   double damping;                  // Rayleigh's damping
   double thickness;                // thickness (2D only)
-  double stressyield;              // yield strain threshold; 0: elastic
+  double stressyield[2];           // yield strain thresholds (stretch, bend); 0: elastic
   int elastic2d;                   // 2D passive forces; 0: none, 1: bending, 2: stretching, 3: both
   int elastic3d;  // experimental 3D material (mjSpec only); 0: Saint
                   // Venant-Kirchhoff, 1: Stable Neo-Hookean

@@ -1,4 +1,4 @@
-# Copyright 2022 DeepMind Technologies Limited
+# Copyright 2026 DeepMind Technologies Limited
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -13,8 +13,8 @@
 # limitations under the License.
 
 mujoco_test(
-  elasticity_test
+  sdf_test
   PROPERTIES
   ENVIRONMENT
-  "MUJOCO_PLUGIN_DIR=$<TARGET_FILE_DIR:elasticity>"
+  "MUJOCO_PLUGIN_DIR=$<TARGET_FILE_DIR:sdf_plugin>"
 )

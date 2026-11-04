@@ -139,7 +139,7 @@ typedef struct mjData_ {
   int     nJ;                // number of non-zeros in constraint Jacobian
 
   // effective metric: per-step activity flag and sizes, set by mj_effBuild
-  int     efm_active;        // implicit effective metric M+K is active (see mj_effBuild)
+  int     efm_active;        // effective metric M+K: 0 off, 1 on, 2 on with general flex CSR
   int     nefmK;             // number of non-zeros in effective-stiffness CSR
   int     nefmcon;           // packed length of the contact rank-1 rows
   int     nefmT;             // number of tendons with terms in the metric
@@ -218,12 +218,15 @@ typedef struct mjData_ {
   mjtNum* xquat;             // Cartesian orientation of body frame              (nbody x 4)
   mjtNum* xmat;              // Cartesian orientation of body frame              (nbody x 9)
   mjtNum* xipos;             // Cartesian position of body com                   (nbody x 3)
+  mjtNum* xiquat;            // Cartesian orientation of body inertia            (nbody x 4)
   mjtNum* ximat;             // Cartesian orientation of body inertia            (nbody x 9)
   mjtNum* xanchor;           // Cartesian position of joint anchor               (njnt x 3)
   mjtNum* xaxis;             // Cartesian joint axis                             (njnt x 3)
   mjtNum* geom_xpos;         // Cartesian geom position                          (ngeom x 3)
+  mjtNum* geom_xquat;        // Cartesian geom orientation                       (ngeom x 4)
   mjtNum* geom_xmat;         // Cartesian geom orientation                       (ngeom x 9)
   mjtNum* site_xpos;         // Cartesian site position                          (nsite x 3)
+  mjtNum* site_xquat;        // Cartesian site orientation                       (nsite x 4)
   mjtNum* site_xmat;         // Cartesian site orientation                       (nsite x 9)
   mjtNum* cam_xpos;          // Cartesian camera position                        (ncam x 3)
   mjtNum* cam_xmat;          // Cartesian camera orientation                     (ncam x 9)

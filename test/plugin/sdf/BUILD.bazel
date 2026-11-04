@@ -1,5 +1,4 @@
-# Description:
-#   Tests for mujoco/plugin/elasticity
+# Tests for mujoco/plugin/sdf
 
 load("@rules_cc//cc:cc_test.bzl", "cc_test")
 load("//:build_defs.bzl", "MJ_ROOT")
@@ -7,8 +6,8 @@ load("//:build_defs.bzl", "MJ_ROOT")
 licenses(["notice"])
 
 cc_test(
-    name = "elasticity_test",
-    srcs = ["elasticity_test.cc"],
+    name = "sdf_test",
+    srcs = ["sdf_test.cc"],
     conlyopts = ["-std=c11"],
     copts = [
         "-I" + MJ_ROOT,
@@ -16,8 +15,8 @@ cc_test(
     ],
     cxxopts = ["-std=c++20"],
     deps = [
-        "//:libmujoco_hdrs",
-        "//plugin/elasticity:register",
+        "//:mujoco",
+        "//plugin/sdf:register",
         "//test:fixture",
         "@googletest//:gtest_main",
     ],

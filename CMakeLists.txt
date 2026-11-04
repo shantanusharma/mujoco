@@ -29,7 +29,7 @@ set(MSVC_INCREMENTAL_DEFAULT ON)
 
 project(
   mujoco
-  VERSION 3.17.1
+  VERSION 4.0.0
   DESCRIPTION "MuJoCo Physics Simulator"
   HOMEPAGE_URL "https://mujoco.org"
 )
@@ -154,7 +154,6 @@ target_include_directories(
 )
 
 if(NOT EMSCRIPTEN)
-  add_subdirectory(plugin/elasticity)
   add_subdirectory(plugin/actuator)
   add_subdirectory(plugin/sensor)
   add_subdirectory(plugin/sdf)
