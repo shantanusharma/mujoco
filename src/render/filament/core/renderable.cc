@@ -196,8 +196,9 @@ void Renderable::UpdateTransform() {
   }
 
   filament::TransformManager& tm = GetEngine()->getTransformManager();
-  if (geom_type_ == mjGEOM_PLANE && (trs_.size[0] <= 0 || trs_.size[1] <= 0)) {
-    infinite_plane_ = true;
+  infinite_plane_ =
+      geom_type_ == mjGEOM_PLANE && (trs_.size[0] <= 0 || trs_.size[1] <= 0);
+  if (infinite_plane_) {
     static constexpr float kInfiniteScale = 0.5f * mjMAXPLANEGRID;
     const mat4f scaling =
         mat4f::scaling(float3{kInfiniteScale, kInfiniteScale, 1.0f});
@@ -365,31 +366,43 @@ void Renderable::Prepare(std::span<const mjrfRenderRequest*> requests,
       // By default, assume we want a square plane.
       draw_state.hidden_parts = kHideDiskPlane;
 
-      // When rendered with a skybox, infinite planes are drawn as disks.
-      if (infinite_plane_ && scene_has_skybox && ShowsSkybox(*request)) {
-        draw_state.hidden_parts = kHideSquarePlane;
-
-        static constexpr float kBasePlaneScale = 0.5f * mjMAXPLANEGRID;
-        const float3 plane_center = camera_pos - elevation * plane_normal;
-        const float3 shift = plane_center - trs_.translation;
-        const float dx = dot(shift, trs_.rotation[0]);
-        const float dy = dot(shift, trs_.rotation[1]);
-        const float plane_scale =
-            kHorizonFarRatio * request->camera.frustum_far;
-        const float ratio = plane_scale / kBasePlaneScale;
-        const float base_scale_x = material.uv_scale[0];
-        const float base_scale_y = material.uv_scale[1];
-        // DiskBuilder uses v = 0.5 + 0.5*y whereas PlaneBuilder uses
-        // v = 0.5 - 0.5*y; flip V scale/offset so textures match.
-        material.uv_scale[0] = base_scale_x * ratio;
-        material.uv_scale[1] = -base_scale_y * ratio;
-        material.uv_offset[0] +=
-            0.5f * base_scale_x * (1.0f - ratio + dx / kBasePlaneScale);
-        material.uv_offset[1] +=
-            0.5f * base_scale_y * (1.0f + ratio - dy / kBasePlaneScale);
-        if (!material.decor) {
-          material.uv_offset[0] = std::fmod(material.uv_offset[0], 1.0f);
-          material.uv_offset[1] = std::fmod(material.uv_offset[1], 1.0f);
+      if (infinite_plane_) {
+        // When rendered with a skybox, infinite planes are drawn as a horizon
+        // disk centered beneath the camera; otherwise they draw the base square
+        // centered at trs_.translation.
+        const bool use_horizon_disk = scene_has_skybox && ShowsSkybox(*request);
+        if (use_horizon_disk) {
+          draw_state.hidden_parts = kHideSquarePlane;
+        }
+        if (material.color_texture) {
+          static constexpr float kBasePlaneScale = 0.5f * mjMAXPLANEGRID;
+          const float3 plane_center =
+              use_horizon_disk ? camera_pos - elevation * plane_normal
+                               : trs_.translation;
+          const float plane_scale =
+              use_horizon_disk ? kHorizonFarRatio * request->camera.frustum_far
+                               : kBasePlaneScale;
+          // DiskBuilder uses v = 0.5 + 0.5*y whereas PlaneBuilder uses
+          // v = 0.5 - 0.5*y; flip V on the disk so world-space UVs match.
+          const float v_sign = use_horizon_disk ? -1.0f : 1.0f;
+          const double tex_repeat_x = material.uv_scale[0];
+          const double tex_repeat_y = material.uv_scale[1];
+          const double cx = dot(plane_center, trs_.rotation[0]);
+          const double cy = dot(plane_center, trs_.rotation[1]);
+          double offset_x =
+              (0.5 * cx - 0.5 * plane_scale) * tex_repeat_x - 0.5;
+          double offset_y =
+              (-0.5 * cy - 0.5 * v_sign * plane_scale) * tex_repeat_y - 0.5;
+          if (!material.decor) {
+            offset_x = std::fmod(offset_x, 1.0);
+            offset_y = std::fmod(offset_y, 1.0);
+          }
+          material.uv_scale[0] =
+              static_cast<float>(plane_scale * tex_repeat_x);
+          material.uv_scale[1] =
+              static_cast<float>(v_sign * plane_scale * tex_repeat_y);
+          material.uv_offset[0] = static_cast<float>(offset_x);
+          material.uv_offset[1] = static_cast<float>(offset_y);
         }
       }
     }
@@ -573,30 +586,34 @@ void Renderable::SetWireframe(bool wireframe) {
 
 void Renderable::SetGeomMesh(mjtGeom type, int nstack, int nslice, int nquad) {
   ClearParts();
-  Builtins* builtins =
-      material_mgr_->GetObjectManager()->GetBuiltins(nstack, nslice, nquad);
+
+  Builtins::Quads num_quads{nquad};
+  Builtins::Stacks num_stacks{nstack};
+  Builtins::Slices num_slices{nslice};
+  Builtins* builtins = material_mgr_->GetObjectManager()->GetBuiltins();
+
   geom_type_ = type;
 
   switch (type) {
     case mjGEOM_PLANE:
-      AppendMesh(builtins->Plane());
-      AppendMesh(builtins->Disk());
+      AppendMesh(builtins->Plane(num_quads));
+      AppendMesh(builtins->Disk(num_slices, num_quads));
       SetHiddenParts(kHideDiskPlane);
       break;
     case mjGEOM_SPHERE:
-      AppendMesh(builtins->Sphere());
+      AppendMesh(builtins->Sphere(num_stacks, num_slices));
       break;
     case mjGEOM_ELLIPSOID:
-      AppendMesh(builtins->Sphere());
+      AppendMesh(builtins->Sphere(num_stacks, num_slices));
       break;
     case mjGEOM_BOX:
-      AppendMesh(builtins->Box());
+      AppendMesh(builtins->Box(num_quads));
       break;
     case mjGEOM_CAPSULE:
       // Capsules are a tube with two domes at the ends.
-      AppendMesh(builtins->Tube());
-      AppendMesh(builtins->DomeTop());
-      AppendMesh(builtins->DomeBottom());
+      AppendMesh(builtins->Tube(num_stacks, num_slices));
+      AppendMesh(builtins->DomeTop(num_stacks, num_slices));
+      AppendMesh(builtins->DomeBottom(num_stacks, num_slices));
 
       get_transform_fn_ = [](int index, const Trs& trs) {
         // We apply an inverse scale to the domes to counteract the capsule's
@@ -627,9 +644,9 @@ void Renderable::SetGeomMesh(mjtGeom type, int nstack, int nslice, int nquad) {
       break;
     case mjGEOM_CYLINDER:
       // Cylinders are a tube with two disks at the ends.
-      AppendMesh(builtins->Tube());
-      AppendMesh(builtins->Disk());
-      AppendMesh(builtins->Disk());
+      AppendMesh(builtins->Tube(num_stacks, num_slices));
+      AppendMesh(builtins->Disk(num_slices, num_quads));
+      AppendMesh(builtins->Disk(num_slices, num_quads));
 
       get_transform_fn_ = [](int index, const Trs& trs) {
         if (index == 0) {
@@ -656,10 +673,10 @@ void Renderable::SetGeomMesh(mjtGeom type, int nstack, int nslice, int nquad) {
       };
       break;
     case mjGEOM_ARROW:
-      AppendMesh(builtins->Tube());
-      AppendMesh(builtins->Cone());
-      AppendMesh(builtins->Disk());
-      AppendMesh(builtins->Disk());
+      AppendMesh(builtins->Tube(num_stacks, num_slices));
+      AppendMesh(builtins->Cone(num_stacks, num_slices));
+      AppendMesh(builtins->Disk(num_slices, num_quads));
+      AppendMesh(builtins->Disk(num_slices, num_quads));
 
       get_transform_fn_ = [](int index, const Trs& trs) {
         mat4f base = mat4f(trs.rotation, trs.translation);
@@ -691,9 +708,9 @@ void Renderable::SetGeomMesh(mjtGeom type, int nstack, int nslice, int nquad) {
       };
       break;
     case mjGEOM_ARROW1:
-      AppendMesh(builtins->Tube());
-      AppendMesh(builtins->Cone());
-      AppendMesh(builtins->Disk());
+      AppendMesh(builtins->Tube(num_stacks, num_slices));
+      AppendMesh(builtins->Cone(num_stacks, num_slices));
+      AppendMesh(builtins->Disk(num_slices, num_quads));
 
       get_transform_fn_ = [](int index, const Trs& trs) {
         mat4f base = mat4f(trs.rotation, trs.translation);
@@ -718,11 +735,11 @@ void Renderable::SetGeomMesh(mjtGeom type, int nstack, int nslice, int nquad) {
       };
       break;
     case mjGEOM_ARROW2:
-      AppendMesh(builtins->Tube());
-      AppendMesh(builtins->Cone());
-      AppendMesh(builtins->Cone());
-      AppendMesh(builtins->Disk());
-      AppendMesh(builtins->Disk());
+      AppendMesh(builtins->Tube(num_stacks, num_slices));
+      AppendMesh(builtins->Cone(num_stacks, num_slices));
+      AppendMesh(builtins->Cone(num_stacks, num_slices));
+      AppendMesh(builtins->Disk(num_slices, num_quads));
+      AppendMesh(builtins->Disk(num_slices, num_quads));
 
       get_transform_fn_ = [](int index, const Trs& trs) {
         mat4f base = mat4f(trs.rotation, trs.translation);

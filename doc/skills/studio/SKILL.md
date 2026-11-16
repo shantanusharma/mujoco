@@ -3,16 +3,17 @@ name: mujoco-studio
 description: >-
   Builds and launches interactive MuJoCo Studio viewers and plugins in Python
   and C++, covering decoupled sim/viewer threads, Snapshot and Event messaging,
-  lifecycle events, WebViewer browser streaming, and Python hot reload. Use when
-  launching Studio viewers (launch_web, launch_native, launch_passive,
-  LaunchStudio), authoring Python ViewerPlugin/SimPlugin or C++ RegisterPlugin
-  (mjPLUGIN_LIB_INIT) extensions, synchronizing sim and viewer state
-  (ViewerHandle.sync, @messages.handler), hot-reloading Python plugins or models
-  (HotReloadEvent), iterating on a live hot-reload Studio session, configuring
-  graphics modes or WebViewer NetImgui/WASM streaming, or debugging Studio and
-  browser console logs. Don't use for Dear ImGui/ImPlot widget layout or styling
-  (use mujoco-gui), core physics stepping (use mujoco-python), or headless
-  offscreen rendering (use mujoco-rendering).
+  lifecycle events, WebViewer browser streaming, and Python hot reload. Use
+  only when launching MuJoCo Studio viewers (mujoco_studio.launch_web,
+  launch_native, launch_passive, LaunchStudio) for a MuJoCo
+  MjModel/MjData/MjSpec simulation, authoring MuJoCo Studio Python
+  ViewerPlugin/SimPlugin or C++ RegisterPlugin (mjPLUGIN_LIB_INIT) extensions,
+  synchronizing MuJoCo sim/viewer state (ViewerHandle.sync, @messages.handler),
+  hot-reloading plugins/models (HotReloadEvent), configuring WebViewer WASM
+  streaming, or debugging Studio logs. Don't use for non-MuJoCo simulations or
+  generic web viewers/sidecars not using MuJoCo, Dear ImGui/ImPlot layout
+  (mujoco-gui), core stepping (mujoco-python), or headless rendering
+  (mujoco-rendering).
 ---
 
 # MuJoCo Studio: Interactive Simulation, UI & Plugin Architecture
@@ -21,7 +22,7 @@ Studio replaces the legacy `simulate` tools with a modular interactive
 visualization stack built on [Dear ImGui](https://github.com/ocornut/imgui) and
 ImPlot for UI, Google Filament (PBR with Vulkan, OpenGL, Metal, and WebGL
 backends) for rendering, and out-of-the-box browser streaming via `WebViewer`
-(NetImgui WASM). Its default interface, the **Studio Viewer App**, is designed
+(WASM). Its default interface, the **Studio Viewer App**, is designed
 around composable **Studio Plugins** that teams can share across environment
 authoring (e.g., Gymnasium or robotics suites), asset inspection/loading tools,
 and agent monitoring/control workflows.
@@ -31,8 +32,9 @@ and agent monitoring/control workflows.
 > **Official MuJoCo documentation (`doc/*.rst`):** Detailed Studio architecture,
 > lifecycle tables, and C++/web docs live in
 > [`../../studio/`](../../studio/index.rst)—read these short `.rst` chapters
-> directly when in a MuJoCo checkout (reserve `.. _Label:` grep for large files
-> like `XMLreference.rst`), or fetch
+> directly when present locally or in `pip install mujoco` under
+> `pathlib.Path(mujoco.__file__).parent / 'doc'` (reserve `.. _Label:` grep for
+> large files like `XMLreference.rst`), or fetch
 > `https://mujoco.readthedocs.io/en/latest/studio/<page>.html` (or `/en/stable/`
 > once released; Sphinx anchors lowercase the label, e.g. `#studiodiffsync`).
 >
@@ -100,7 +102,7 @@ when your task touches these areas:
 | :--- | :--- | :--- |
 | **GUI & Plotting** | Fixed `mjui` panels & `mjr_figure` | **Dear ImGui** & **ImPlot** |
 | **Render Backend** | Classic OpenGL (`mjrContext`) | **Filament** PBR (Vulkan, OpenGL, Metal, WebGL) |
-| **Web & Remote** | None | **WebViewer** (NetImgui UI + state over HTTP/WS) & **MuJoCo Live** (WASM) |
+| **Web & Remote** | None | **WebViewer** (streamed ImGui UI + state over HTTP/WS) & **MuJoCo Live** (WASM) |
 | **Extensibility** | Hardcoded panels and keybinds | **Plugin Architecture** in Python and C++ |
 | **Threading & Sync** | Shared `model`/`data` with locking | Python & desktop C++: decoupled sim/viewer threads; WASM (`MuJoCo Live`): single-threaded |
 
@@ -152,6 +154,10 @@ rendering and UI through non-blocking message endpoints:
         ImPlot charting (`viewer.py --model=... --plugins=python/mujoco/sample/studio/implot.py`).
     -   `python/mujoco/sample/studio/custom_sim_loop.py` — External script owning its stepping and
         pacing loop via `handle.sync(model, data)`.
+    -   `python/mujoco/sample/studio/python_scene.py` — `MyScene` and
+        `MySceneGui` demonstrating a hot-reloading scene built in Python paired
+        with UI (run `viewer.py --hot_reload=all` with
+        `--plugins=python/mujoco/sample/studio/python_scene.py`).
 
 ## 2. Launching Python Viewers
 
@@ -162,7 +168,7 @@ Studio provides three runner modules sharing the same `.run(...)` and
     **Recommended default.** Spawns `WebViewer` in a background daemon thread
     with **zero host graphics dependencies** (no X11/Wayland display server or
     host Filament libraries required): physics and headless Dear ImGui layout
-    run on the host while draw commands (NetImgui) and state stream over
+    run on the host while UI draw commands and state stream over
     WebSockets to a browser WASM client. Ideal for remote workstations,
     containers, and headless servers.
 2.  **`launch_native.run`**
@@ -283,6 +289,63 @@ overlays, and `messages.Priority` levels, read
 [studio/python_plugins.rst](../../studio/python_plugins.rst)
 (`.. _StudioSceneOverlays:`, `.. _StudioLifecycle:`, `.. _StudioDiffSync:`,
 `.. _StudioPriorities:`).
+
+### Scenes Built in Python (`LoadModelEvent` + `handle.set_model()`)
+
+A sim plugin that handles `LoadModelEvent`, calls `self.handle.set_model(spec)`,
+and returns `True` provides the model; handle `HotReloadEvent` (`if self in
+event.plugins: self.handle.reload()`) so saving the file rebuilds the scene in
+place. Pair it with a `ViewerPlugin` (same file is fine) whose ImGui controls
+send it `Event`s or `Snapshot`s, and run with
+`viewer.py --plugins=my_scene.py --hot_reload=all`. The contract — when
+`LoadModelEvent` is dispatched and how handlers handle it, `event.path`,
+Reload, errors, hot reload — is documented on `messages.LoadModelEvent`;
+`ViewerHandle.set_model` and `ViewerHandle.reload` cover the API, and
+`python/mujoco/sample/studio/python_scene.py` is a complete, runnable scene
+paired with UI. Define the plugins in a module, not in `__main__`, to
+hot-reload them; don't name your own handlers `_sim_plugin_on_*` /
+`_viewer_plugin_on_*` (the base classes' handlers). Plugins must be registered
+at launch: when live-coding, stub a `SimPlugin` and a `ViewerPlugin` up front
+and grow them.
+
+> [!IMPORTANT]
+>
+> **Edit the model where it lives.** A scene is either a model file
+> (`--model=scene.xml`: edit the XML, and `--hot_reload=all` or `model`, or the
+> Reload button, picks the edit up with its `<include>`s and assets) or a
+> Python plugin (edit the `.py` file). Don't write a `LoadModelEvent` plugin
+> just to load an existing XML with `MjSpec.from_file` and patch it in Python:
+> the model would then live in two places and edits to the XML would not
+> hot-reload. When asked to change a model and it is unclear whether the user
+> wants the file edited or a Python scene (e.g. to drive a parameter from UI at
+> runtime), ask before choosing.
+>
+> **UI controls for an XML scene are a temporary scaffold.** There is no
+> framework that writes UI values back into an XML file, and `MjSpec.to_xml()`
+> is not an in-place save (it regenerates the whole file, dropping comments,
+> formatting and `<include>`s). When the user is working on an XML scene and
+> asks for controls over some of its parameters, tell them so and propose this
+> workflow:
+>
+> 1.  **Scaffold**: a `LoadModelEvent` sim plugin that keeps the XML path
+>     itself, loads the file into a spec (`mujoco.MjSpec.from_file(path)`),
+>     applies the parameters (`spec.body('torso').pos = ...`) and publishes it
+>     with `self.handle.set_model(spec, watch=[path])`, plus a `ViewerPlugin`
+>     whose UI controls send the values (as in `sample/studio/python_scene.py`).
+>     Reload and hot reload arrive with an empty `event.path`, so leave out the
+>     `if event.path: return False` guard here. Run with `--hot_reload=all` to
+>     grow the plugins while the viewer runs; saving the XML, its `<include>`s
+>     or assets then rebuilds the scene like saving the plugin does.
+> 2.  **Tune** in the UI; the values live in the plugin for now.
+> 3.  **Bake**: once the user is happy, write the final values into the XML by
+>     hand (edit the attributes in place, keeping `<include>`s and comments),
+>     delete the scaffold plugin, and reload the XML on its own to confirm it
+>     matches.
+>
+> If the parameters should stay live, the scene belongs in Python for good
+> (`MjSpec` built in code, no XML); if the file is generated anyway and its
+> formatting does not matter, `spec.to_xml()` can replace step 3. Say so
+> briefly if asked, but do not build anything more elaborate up front.
 
 ### C++ Studio Plugins & `LaunchStudio`
 
@@ -405,5 +468,5 @@ time-to-visual-feedback** rather than upfront batch verification:
     [studio/web_viewers.rst](../../studio/web_viewers.rst),
     `.. _StudioBrowserSandboxing:`).
 5.  **Build and Run with `-c opt`**: Always compile and run Studio targets with
-    `-c opt` so physics stepping, Filament rendering, and NetImgui/WebSocket
+    `-c opt` so physics stepping, Filament rendering, and WebViewer WebSocket
     streaming execute with compiler optimizations enabled.

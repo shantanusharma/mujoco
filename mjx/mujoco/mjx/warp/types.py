@@ -173,6 +173,7 @@ class OptionWarp(PyTreeNode):
   noslip_iterations: int
   noslip_tolerance: jax.Array
   run_collision_detection: bool
+  run_qacc_smooth: bool
   run_rne_postconstraint: bool
   sdf_initpoints: int
   sdf_iterations: int
@@ -228,12 +229,23 @@ class ModelWarp(PyTreeNode):
   efm0_L_rownnz: np.ndarray
   efm0_active: bool
   efm0_dofid: np.ndarray
+  efm_BT_adr: np.ndarray
+  efm_BT_off: np.ndarray
+  efm_BT_row: np.ndarray
   efm_K_colind: np.ndarray
   efm_K_rowadr: np.ndarray
   efm_K_rownnz: np.ndarray
+  efm_L_K_src: np.ndarray
+  efm_L_M_src: np.ndarray
+  efm_L_colind: np.ndarray
+  efm_L_dofid: np.ndarray
+  efm_L_rowadr: np.ndarray
+  efm_L_rownnz: np.ndarray
+  efm_all_covered_or_twist: bool
+  efm_chol_active: bool
   efm_con_max_dof: int
-  efm_dofblk: np.ndarray
   efm_dofid: np.ndarray
+  efm_prec_exact: bool
   eq_connect_adr: np.ndarray
   eq_flex_adr: np.ndarray
   eq_flexstrain_adr: np.ndarray
@@ -260,6 +272,8 @@ class ModelWarp(PyTreeNode):
   flex_edgeflexid: np.ndarray
   flex_edgenum: np.ndarray
   flex_edgestiffness: np.ndarray
+  flex_efcnnz: np.ndarray
+  flex_efcnum: np.ndarray
   flex_eff_possible: np.ndarray
   flex_elem: np.ndarray
   flex_elem_rodedge: np.ndarray
@@ -318,6 +332,8 @@ class ModelWarp(PyTreeNode):
   flexedge_J_colind: np.ndarray
   flexedge_J_rowadr: np.ndarray
   flexedge_J_rownnz: np.ndarray
+  flexedge_efcadr: np.ndarray
+  flexedge_efcnnzadr: np.ndarray
   flexedge_invweight0: np.ndarray
   flexedge_length0: np.ndarray
   flexedge_rigid: np.ndarray
@@ -379,6 +395,7 @@ class ModelWarp(PyTreeNode):
   nbranch: int
   nefm0L: int
   nefm0dof: int
+  nefmBT: int
   nefmK: int
   nefmL: int
   nefmdof: int
@@ -431,6 +448,7 @@ class ModelWarp(PyTreeNode):
   sensor_collision_start_adr: np.ndarray
   sensor_contact_acc_adr: np.ndarray
   sensor_contact_pos_adr: np.ndarray
+  sensor_contact_vel_adr: np.ndarray
   sensor_delay: jax.Array
   sensor_e_kinetic: bool
   sensor_e_potential: bool
@@ -525,6 +543,7 @@ class DataWarp(PyTreeNode):
   cx: jax.Array
   dof_awake_ind: jax.Array
   dof_cdof: jax.Array
+  dof_frictionadr: jax.Array
   dof_island: jax.Array
   dof_islandid: jax.Array
   efc__D: jax.Array
@@ -549,7 +568,7 @@ class DataWarp(PyTreeNode):
   efc__vel: jax.Array
   efc_islandid: jax.Array
   efm_K_val: jax.Array
-  efm_L: jax.Array
+  efm_L_val: jax.Array
   efm_as: jax.Array
   efm_c: jax.Array
   efm_ca: jax.Array
@@ -764,6 +783,7 @@ _NDIM = {
         'cx': 3,
         'dof_awake_ind': 2,
         'dof_cdof': 2,
+        'dof_frictionadr': 2,
         'dof_island': 2,
         'dof_islandid': 2,
         'efc__D': 2,
@@ -788,7 +808,7 @@ _NDIM = {
         'efc__vel': 2,
         'efc_islandid': 2,
         'efm_K_val': 2,
-        'efm_L': 2,
+        'efm_L_val': 2,
         'efm_as': 2,
         'efm_c': 2,
         'efm_ca': 2,
@@ -1057,12 +1077,23 @@ _NDIM = {
         'efm0_L_rownnz': 1,
         'efm0_active': 0,
         'efm0_dofid': 1,
+        'efm_BT_adr': 1,
+        'efm_BT_off': 1,
+        'efm_BT_row': 1,
         'efm_K_colind': 1,
         'efm_K_rowadr': 1,
         'efm_K_rownnz': 1,
+        'efm_L_K_src': 1,
+        'efm_L_M_src': 1,
+        'efm_L_colind': 1,
+        'efm_L_dofid': 1,
+        'efm_L_rowadr': 1,
+        'efm_L_rownnz': 1,
+        'efm_all_covered_or_twist': 0,
+        'efm_chol_active': 0,
         'efm_con_max_dof': 0,
-        'efm_dofblk': 1,
         'efm_dofid': 1,
+        'efm_prec_exact': 0,
         'eq_active0': 1,
         'eq_connect_adr': 1,
         'eq_data': 3,
@@ -1098,6 +1129,8 @@ _NDIM = {
         'flex_edgeflexid': 1,
         'flex_edgenum': 1,
         'flex_edgestiffness': 1,
+        'flex_efcnnz': 1,
+        'flex_efcnum': 1,
         'flex_eff_possible': 1,
         'flex_elem': 1,
         'flex_elem_rodedge': 2,
@@ -1164,6 +1197,8 @@ _NDIM = {
         'flexedge_J_colind': 1,
         'flexedge_J_rowadr': 1,
         'flexedge_J_rownnz': 1,
+        'flexedge_efcadr': 1,
+        'flexedge_efcnnzadr': 1,
         'flexedge_invweight0': 1,
         'flexedge_length0': 1,
         'flexedge_rigid': 1,
@@ -1318,6 +1353,7 @@ _NDIM = {
         'ncam': 0,
         'nefm0L': 0,
         'nefm0dof': 0,
+        'nefmBT': 0,
         'nefmK': 0,
         'nefmL': 0,
         'nefmdof': 0,
@@ -1405,6 +1441,7 @@ _NDIM = {
         'opt__noslip_iterations': 0,
         'opt__noslip_tolerance': 1,
         'opt__run_collision_detection': 0,
+        'opt__run_qacc_smooth': 0,
         'opt__run_rne_postconstraint': 0,
         'opt__sdf_initpoints': 0,
         'opt__sdf_iterations': 0,
@@ -1442,6 +1479,7 @@ _NDIM = {
         'sensor_collision_start_adr': 1,
         'sensor_contact_acc_adr': 1,
         'sensor_contact_pos_adr': 1,
+        'sensor_contact_vel_adr': 1,
         'sensor_cutoff': 1,
         'sensor_datatype': 1,
         'sensor_delay': 2,
@@ -1545,6 +1583,7 @@ _NDIM = {
         'noslip_iterations': 0,
         'noslip_tolerance': 1,
         'run_collision_detection': 0,
+        'run_qacc_smooth': 0,
         'run_rne_postconstraint': 0,
         'sdf_initpoints': 0,
         'sdf_iterations': 0,
@@ -1615,6 +1654,7 @@ _BATCH_DIM = {
         'cx': True,
         'dof_awake_ind': True,
         'dof_cdof': True,
+        'dof_frictionadr': True,
         'dof_island': True,
         'dof_islandid': True,
         'efc__D': True,
@@ -1639,7 +1679,7 @@ _BATCH_DIM = {
         'efc__vel': True,
         'efc_islandid': True,
         'efm_K_val': True,
-        'efm_L': True,
+        'efm_L_val': True,
         'efm_as': True,
         'efm_c': True,
         'efm_ca': True,
@@ -1908,12 +1948,23 @@ _BATCH_DIM = {
         'efm0_L_rownnz': False,
         'efm0_active': False,
         'efm0_dofid': False,
+        'efm_BT_adr': False,
+        'efm_BT_off': False,
+        'efm_BT_row': False,
         'efm_K_colind': False,
         'efm_K_rowadr': False,
         'efm_K_rownnz': False,
+        'efm_L_K_src': False,
+        'efm_L_M_src': False,
+        'efm_L_colind': False,
+        'efm_L_dofid': False,
+        'efm_L_rowadr': False,
+        'efm_L_rownnz': False,
+        'efm_all_covered_or_twist': False,
+        'efm_chol_active': False,
         'efm_con_max_dof': False,
-        'efm_dofblk': False,
         'efm_dofid': False,
+        'efm_prec_exact': False,
         'eq_active0': False,
         'eq_connect_adr': False,
         'eq_data': True,
@@ -1949,6 +2000,8 @@ _BATCH_DIM = {
         'flex_edgeflexid': False,
         'flex_edgenum': False,
         'flex_edgestiffness': False,
+        'flex_efcnnz': False,
+        'flex_efcnum': False,
         'flex_eff_possible': False,
         'flex_elem': False,
         'flex_elem_rodedge': False,
@@ -2015,6 +2068,8 @@ _BATCH_DIM = {
         'flexedge_J_colind': False,
         'flexedge_J_rowadr': False,
         'flexedge_J_rownnz': False,
+        'flexedge_efcadr': False,
+        'flexedge_efcnnzadr': False,
         'flexedge_invweight0': False,
         'flexedge_length0': False,
         'flexedge_rigid': False,
@@ -2169,6 +2224,7 @@ _BATCH_DIM = {
         'ncam': False,
         'nefm0L': False,
         'nefm0dof': False,
+        'nefmBT': False,
         'nefmK': False,
         'nefmL': False,
         'nefmdof': False,
@@ -2256,6 +2312,7 @@ _BATCH_DIM = {
         'opt__noslip_iterations': False,
         'opt__noslip_tolerance': True,
         'opt__run_collision_detection': False,
+        'opt__run_qacc_smooth': False,
         'opt__run_rne_postconstraint': False,
         'opt__sdf_initpoints': False,
         'opt__sdf_iterations': False,
@@ -2293,6 +2350,7 @@ _BATCH_DIM = {
         'sensor_collision_start_adr': False,
         'sensor_contact_acc_adr': False,
         'sensor_contact_pos_adr': False,
+        'sensor_contact_vel_adr': False,
         'sensor_cutoff': False,
         'sensor_datatype': False,
         'sensor_delay': True,
@@ -2396,6 +2454,7 @@ _BATCH_DIM = {
         'noslip_iterations': False,
         'noslip_tolerance': True,
         'run_collision_detection': False,
+        'run_qacc_smooth': False,
         'run_rne_postconstraint': False,
         'sdf_initpoints': False,
         'sdf_iterations': False,

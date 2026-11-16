@@ -1084,6 +1084,7 @@ typedef struct {
   int* L_colind;          // Cholesky factor column indices               (nL x 1)
   int* LT_colind;         // Cholesky factor transpose column indices     (nL x 1)
   int* LT_map;            // CSC-to-CSR index mapping                     (nL x 1)
+  int* L_super;           // Cholesky factor supernode sizes              (nv x 1)
   mjtNum* L;              // Cholesky factor                              (nL x 1)
   mjtNum* Lcone;          // Cholesky factor with cone contributions      (nL x 1)
 
@@ -1107,8 +1108,8 @@ typedef struct {
   int flg_metric;         // effective metric active for this solve
   const mjModel* fm;      // model, for the metric calls
   mjData* fd;             // data, for the metric calls
-  mjtNum* epL;            // CG: metric blocks with the efc rows and rank-1 classes folded in
-                          // (mj_effPrecFold), 9*mj_effFoldBlocks, or NULL
+  mjtNum* epL;            // CG: per-dof diagonal with efc and contact rows folded in
+                          // (mj_effPrecFold), mj_effFoldDiagSize, or NULL
 
   // Newton: lower-triangle view of the metric matrix S = diag(h*D+h^2*K) + K_csr, built by
   // MakeMetricLower on the solver stack, merged into the Hessian alongside M
@@ -1225,6 +1226,40 @@ static void PrimalPointers(const mjModel* m, const mjData* d, mjPrimalContext* c
     ctx->efc_type         = d->iefc_type         + iefcadr;
     ctx->efc_force        = d->iefc_force        + iefcadr;
     ctx->efc_state        = d->iefc_state        + iefcadr;
+
+    // single island covering all DOFs: mj_island fills map_dof2idof and map_efc2iefc in
+    // ascending order per island, so both maps are the identity and monolithic M, qLD, and J
+    // can be reused directly without copying
+    if (d->nisland == 1 && d->nidof == m->nv && !mj_effUseQH(d)) {
+      ctx->nJ               = d->nJ;
+      ctx->M_rownnz         = m->M_rownnz;
+      ctx->M_rowadr         = m->M_rowadr;
+      ctx->M_colind         = m->M_colind;
+      ctx->M                = d->M;
+      ctx->qLD              = d->qLD;
+      ctx->qLDiagInv        = d->qLDiagInv;
+      ctx->J                = d->efc_J;
+      if (ctx->is_sparse) {
+        ctx->J_rownnz       = d->efc_J_rownnz;
+        ctx->J_rowadr       = d->efc_J_rowadr;
+        ctx->J_rowsuper     = d->efc_J_rowsuper;
+        ctx->J_colind       = d->efc_J_colind;
+      }
+    }
+  }
+
+  // check whether any elliptic contact constraint is actually present
+  if (ctx->is_elliptic) {
+    int has_elliptic = 0;
+    if (d->ncon > 0) {
+      for (int i = ctx->ne + ctx->nf; i < ctx->nefc; i++) {
+        if (ctx->efc_type[i] == mjCNSTR_CONTACT_ELLIPTIC) {
+          has_elliptic = 1;
+          break;
+        }
+      }
+    }
+    ctx->is_elliptic = has_elliptic;
   }
 }
 
@@ -1238,10 +1273,11 @@ static void PrimalAllocate(const mjModel* m, mjData* d, mjPrimalContext* ctx, in
   int is_sparse = ctx->is_sparse;
   int is_elliptic = ctx->is_elliptic;
   int nJ = is_sparse ? d->nJ : 0;
+  int copy_island = (ctx->island >= 0 && !ctx->M);
 
   // compute island matrix sizes if needed
   int nC = 0;
-  if (ctx->island >= 0) {
+  if (copy_island) {
     // count nC: number of nonzeros in M block of island (always sparse)
     int island = ctx->island;
     int idofadr = d->island_idofadr[island];
@@ -1318,17 +1354,15 @@ static void PrimalAllocate(const mjModel* m, mjData* d, mjPrimalContext* ctx, in
       nInt += (count);         \
   } while (0)
 
-  // CG: the solver's copy of the metric blocks (and 1D DER twist diagonal), for mj_effPrecFold
-  int nep = !flg_Newton ? 9*mj_effFoldBlocks(d, ctx->island) + mj_effTwistDiagSize(m, d, ctx->island) : 0;
+  // CG: per-dof folded diagonal, for mj_effPrecFold
+  int nep = !flg_Newton ? mj_effFoldDiagSize(m, d, ctx->island) : 0;
 
   for (int pass = 0; pass < 2; pass++) {
     if (pass) {
-      // keep the folded blocks only if the stack holds them with the other arrays and the
-      // deepest frame the solve takes on top: the fold, the preconditioner or the metric
-      // product. Else the step's blocks precondition the solve, with a warning
+      // keep the folded diagonal only if the stack holds it with the other arrays and the
+      // deepest frame the solve takes on top: the preconditioner or the metric product
       if (nep) {
-        size_t fold = mj_effFoldScratch(nv);
-        size_t scratch = mjMAX(fold, mjMAX(mj_effPrecScratch(m, d), mj_effMulAddScratch(m, d)));
+        size_t scratch = mjMAX(mj_effPrecScratch(m, d), mj_effMulAddScratch(m, d));
         size_t need = mj_stackBytes(sizeof(mjtNum)*nNum, _Alignof(mjtNum)) +
                       mj_stackBytes(sizeof(int)*nInt, _Alignof(int)) + scratch;
         if (need > mj_stackBytesAvailable(d)) {
@@ -1342,7 +1376,7 @@ static void PrimalAllocate(const mjModel* m, mjData* d, mjPrimalContext* ctx, in
     }
 
     // island matrices
-    if (ctx->island >= 0) {
+    if (copy_island) {
       // inertia
       CARVE_INT(ctx->M_rownnz,  nv);
       CARVE_INT(ctx->M_rowadr,  nv);
@@ -1382,6 +1416,7 @@ static void PrimalAllocate(const mjModel* m, mjData* d, mjPrimalContext* ctx, in
         CARVE_NUM(ctx->LTJ, 6*nv);
       }
       if (is_sparse) {
+        _Static_assert(sizeof(mjtNum) >= sizeof(int), "cholscratch must hold nv ints");
         CARVE_NUM(ctx->cholscratch, nv);
       } else {
         ctx->nL = nv*nv;
@@ -1438,7 +1473,7 @@ static void PrimalAllocate(const mjModel* m, mjData* d, mjPrimalContext* ctx, in
 #undef CARVE_INT
 
   // populate island matrices if needed
-  if (ctx->island >= 0) {
+  if (copy_island) {
     int island = ctx->island;
     int idofadr = d->island_idofadr[island];
     int iefcadr = d->island_iefcadr[island];
@@ -1446,8 +1481,9 @@ static void PrimalAllocate(const mjModel* m, mjData* d, mjPrimalContext* ctx, in
     // under the discrete metric, gather the qH backbone factor of M + diag in place of
     // qLD: both are block-diagonal by tree, so the island block of the global factor is
     // the factor of the island block
-    const mjtNum* gLD = (d->efm_active && d->efm_diag) ? d->qH : d->qLD;
-    const mjtNum* gLDiagInv = (d->efm_active && d->efm_diag) ? d->qHDiagInv : d->qLDiagInv;
+    int use_qH = mj_effUseQH(d);
+    const mjtNum* gLD = use_qH ? d->qH : d->qLD;
+    const mjtNum* gLDiagInv = use_qH ? d->qHDiagInv : d->qLDiagInv;
     mju_blockSparse(ctx->qLD, ctx->M_rownnz, ctx->M_rowadr, ctx->M_colind,
                     gLD, m->M_rownnz, m->M_rowadr, m->M_colind,
                     nv, d->map_idof2dof + idofadr, d->map_dof2idof,
@@ -1517,7 +1553,8 @@ static void PrimalUpdateConstraint(mjPrimalContext* ctx, int flg_HessianCone) {
   // update constraints
   mj_constraintUpdate_impl(ctx->ne, ctx->nf, ctx->nefc, ctx->efc_D, ctx->efc_R,
                            ctx->efc_frictionloss, ctx->Jaref, ctx->efc_type, ctx->efc_id,
-                           ctx->contact, ctx->efc_state, ctx->efc_force,
+                           ctx->is_elliptic ? ctx->contact : NULL,
+                           ctx->efc_state, ctx->efc_force,
                            &(ctx->cost), flg_HessianCone);
 
   // compute qfrc_constraint (dense or sparse)
@@ -1531,9 +1568,15 @@ static void PrimalUpdateConstraint(mjPrimalContext* ctx, int flg_HessianCone) {
   // count active and cone
   ctx->nactive = 0;
   ctx->ncone = 0;
-  for (int i=0; i < nefc; i++) {
-    ctx->nactive += (ctx->efc_state[i] != mjCNSTRSTATE_SATISFIED);
-    ctx->ncone += (ctx->efc_state[i] == mjCNSTRSTATE_CONE);
+  if (!ctx->is_elliptic) {
+    for (int i=0; i < nefc; i++) {
+      ctx->nactive += (ctx->efc_state[i] != mjCNSTRSTATE_SATISFIED);
+    }
+  } else {
+    for (int i=0; i < nefc; i++) {
+      ctx->nactive += (ctx->efc_state[i] != mjCNSTRSTATE_SATISFIED);
+      ctx->ncone += (ctx->efc_state[i] == mjCNSTRSTATE_CONE);
+    }
   }
 
   // add Gauss cost, set in quadratic[0]
@@ -1622,6 +1665,21 @@ static void PrimalPrepare(mjPrimalContext* ctx) {
   //  quadGauss[0] already computed in PrimalUpdateConstraint
   ctx->quadGauss[1] = mju_dot(v, ctx->Ma, nv) - mju_dot(ctx->qfrc_smooth, v, nv);
   ctx->quadGauss[2] = 0.5*mju_dot(v, ctx->Mv, nv);
+
+  // fast path: no elliptic cones
+  if (!ctx->is_elliptic) {
+    for (int i=0; i < nefc; i++) {
+      mjtNum Jv = ctx->Jv[i];
+      mjtNum Jaref = ctx->Jaref[i];
+      mjtNum D = ctx->efc_D[i];
+      mjtNum DJ0 = D*Jaref;
+      mjtNum* quad = ctx->quad + 3*i;
+      quad[0] = 0.5*(Jaref*DJ0);
+      quad[1] = Jv*DJ0;
+      quad[2] = 0.5*(Jv*D*Jv);
+    }
+    return;
+  }
 
   // process constraints
   for (int i=0; i < nefc; i++) {
@@ -1821,146 +1879,160 @@ static void PrimalEval(mjPrimalContext* ctx, mjPrimalPnt* p) {
   // init quad with Gauss, shifted: drop quadGauss[0]
   mjtNum quadTotal[3] = {0, ctx->quadGauss[1], ctx->quadGauss[2]};
 
-  // process constraints
-  for (int i=0; i < nefc; i++) {
-    // equality: shifted quad (skip quad[0])
-    if (i < ne) {
-      quadTotal[1] += ctx->quad[3*i+1];
-      quadTotal[2] += ctx->quad[3*i+2];
-      continue;
+  // equality: shifted quad (skip quad[0])
+  for (int i=0; i < ne; i++) {
+    quadTotal[1] += ctx->quad[3*i+1];
+    quadTotal[2] += ctx->quad[3*i+2];
+  }
+
+  // friction: compute cost(alpha) - cost(0) directly
+  for (int i=ne; i < ne + nf; i++) {
+    // search point, friction loss, bound (Rf)
+    mjtNum start = ctx->Jaref[i];
+    mjtNum dir = ctx->Jv[i];
+    mjtNum x = start + alpha*dir;
+    mjtNum f = ctx->efc_frictionloss[i];
+    mjtNum D = ctx->efc_D[i];
+    mjtNum Rf = ctx->efc_R[i]*f;
+
+    // cost delta
+    cost += frictionCostDif(start, x, f, Rf, D);
+
+    // -bound < x < bound : quadratic
+    if (-Rf < x && x < Rf) {
+      deriv[0] += D*x*dir;
+      deriv[1] += D*dir*dir;
     }
 
-    // friction: compute cost(alpha) - cost(0) directly
-    if (i < ne + nf) {
-      // search point, friction loss, bound (Rf)
-      mjtNum start = ctx->Jaref[i];
-      mjtNum dir = ctx->Jv[i];
-      mjtNum x = start + alpha*dir;
-      mjtNum f = ctx->efc_frictionloss[i];
-      mjtNum D = ctx->efc_D[i];
-      mjtNum Rf = ctx->efc_R[i]*f;
-
-      // cost delta
-      cost += frictionCostDif(start, x, f, Rf, D);
-
-      // -bound < x < bound : quadratic
-      if (-Rf < x && x < Rf) {
-        deriv[0] += D*x*dir;
-        deriv[1] += D*dir*dir;
-      }
-
-      // x < -bound : linear negative
-      else if (x <= -Rf) {
-        deriv[0] += -f*dir;
-      }
-
-      // bound < x : linear positive
-      else {
-        deriv[0] += f*dir;
-      }
-      continue;
+    // x < -bound : linear negative
+    else if (x <= -Rf) {
+      deriv[0] += -f*dir;
     }
 
-    // limit and contact
-    if (ctx->efc_type[i] == mjCNSTR_CONTACT_ELLIPTIC) {         // elliptic cone
-      // extract contact info
-      const mjContact* con = ctx->contact + ctx->efc_id[i];
-      const mjtNum* Jaref = ctx->Jaref + i;
-      const mjtNum* Jv = ctx->Jv + i;
-      const mjtNum* friction = con->friction;
-      mjtNum* quad = ctx->quad + 3*i;
-      int dim = con->dim;
-      mjtNum mu = con->mu;
+    // bound < x : linear positive
+    else {
+      deriv[0] += f*dir;
+    }
+  }
 
-      // unpack quad
-      mjtNum U0 = quad[3];
-      mjtNum V0 = quad[4];
-      mjtNum Dm = quad[6];
-
-      // normal and tangential components at alpha (formed componentwise before squaring)
-      mjtNum N = U0 + alpha*V0;
-      mjtNum V[5], W[5];
-      mjtNum Tsqr = 0, WV = 0, Tsqr_delta = 0;
-      for (int j=0; j < dim-1; j++) {
-        mjtNum Uj = Jaref[j+1]*friction[j];
-        mjtNum Vj = Jv[j+1]*friction[j];
-        mjtNum Wj = Uj + alpha*Vj;
-        V[j] = Vj;
-        W[j] = Wj;
-        Tsqr += Wj*Wj;
-        WV += Wj*Vj;
-        Tsqr_delta += alpha*Vj*(Uj + Wj);
-      }
-      mjtNum T = mju_sqrt(Tsqr);
-
-      // shifted cost
-      cost += ellipticCostDif(quad, alpha, mu, N, T, Tsqr_delta);
-
-      // no tangential force : top or bottom zone
-      if (Tsqr <= 0) {
-        // bottom zone: quadratic derivatives
-        if (N < 0) {
-          deriv[0] += 2*alpha*quad[2] + quad[1];
-          deriv[1] += 2*quad[2];
-        }
-
-        // top zone: nothing to do
-      }
-
-      // otherwise regular processing
-      else {
-        // N>=mu*T : top zone
-        if (N >= mu*T) {
-          // nothing to do
-        }
-
-        // mu*N+T<=0 : bottom zone
-        else if (mu*N+T <= 0) {
-          deriv[0] += 2*alpha*quad[2] + quad[1];
-          deriv[1] += 2*quad[2];
-        }
-
-        // otherwise middle zone
-        else {
-          // unit tangent What = W / T
-          mjtNum What[5];
-          for (int j=0; j < dim-1; j++) {
-            What[j] = W[j] / T;
-          }
-
-          // cross-product norm squared ||What ^ V||^2 via Lagrange identity to avoid cancellation
-          mjtNum det = 0;
-          for (int j=0; j < dim-1; j++) {
-            for (int k=j+1; k < dim-1; k++) {
-              mjtNum djk = What[j]*V[k] - What[k]*V[j];
-              det += djk*djk;
-            }
-          }
-
-          // derivatives
-          mjtNum N1 = V0;
-          mjtNum T1 = WV / T;
-          deriv[0] += Dm*(N-mu*T)*(N1-mu*T1);
-          deriv[1] += Dm*((N1-mu*T1)*(N1-mu*T1) + (N/T - mu)*(-mu*det));
-        }
-      }
-
-      // advance to next constraint
-      i += (dim-1);
-    } else {                                                  // inequality
-      // search point
+  // limit and contact: fast path when no elliptic contacts exist
+  if (!ctx->is_elliptic) {
+    for (int i=ne + nf; i < nefc; i++) {
       mjtNum start = ctx->Jaref[i];
       mjtNum x = start + alpha*ctx->Jv[i];
       mjtNum cost0 = start < 0 ? ctx->quad[3*i] : 0;
 
-      // active
       if (x < 0) {
-        // shifted quad: add quad[1], quad[2] and (quad[0] - cost0)
         quadTotal[0] += ctx->quad[3*i] - cost0;
         quadTotal[1] += ctx->quad[3*i+1];
         quadTotal[2] += ctx->quad[3*i+2];
       } else {
         cost -= cost0;
+      }
+    }
+  } else {
+    // general path with elliptic cones
+    for (int i=ne + nf; i < nefc; i++) {
+      if (ctx->efc_type[i] == mjCNSTR_CONTACT_ELLIPTIC) {       // elliptic cone
+        // extract contact info
+        const mjContact* con = ctx->contact + ctx->efc_id[i];
+        const mjtNum* Jaref = ctx->Jaref + i;
+        const mjtNum* Jv = ctx->Jv + i;
+        const mjtNum* friction = con->friction;
+        mjtNum* quad = ctx->quad + 3*i;
+        int dim = con->dim;
+        mjtNum mu = con->mu;
+
+        // unpack quad
+        mjtNum U0 = quad[3];
+        mjtNum V0 = quad[4];
+        mjtNum Dm = quad[6];
+
+        // normal and tangential components at alpha (formed componentwise before squaring)
+        mjtNum N = U0 + alpha*V0;
+        mjtNum V[5], W[5];
+        mjtNum Tsqr = 0, WV = 0, Tsqr_delta = 0;
+        for (int j=0; j < dim-1; j++) {
+          mjtNum Uj = Jaref[j+1]*friction[j];
+          mjtNum Vj = Jv[j+1]*friction[j];
+          mjtNum Wj = Uj + alpha*Vj;
+          V[j] = Vj;
+          W[j] = Wj;
+          Tsqr += Wj*Wj;
+          WV += Wj*Vj;
+          Tsqr_delta += alpha*Vj*(Uj + Wj);
+        }
+        mjtNum T = mju_sqrt(Tsqr);
+
+        // shifted cost
+        cost += ellipticCostDif(quad, alpha, mu, N, T, Tsqr_delta);
+
+        // no tangential force : top or bottom zone
+        if (Tsqr <= 0) {
+          // bottom zone: quadratic derivatives
+          if (N < 0) {
+            deriv[0] += 2*alpha*quad[2] + quad[1];
+            deriv[1] += 2*quad[2];
+          }
+
+          // top zone: nothing to do
+        }
+
+        // otherwise regular processing
+        else {
+          // N>=mu*T : top zone
+          if (N >= mu*T) {
+            // nothing to do
+          }
+
+          // mu*N+T<=0 : bottom zone
+          else if (mu*N+T <= 0) {
+            deriv[0] += 2*alpha*quad[2] + quad[1];
+            deriv[1] += 2*quad[2];
+          }
+
+          // otherwise middle zone
+          else {
+            // unit tangent What = W / T
+            mjtNum What[5];
+            for (int j=0; j < dim-1; j++) {
+              What[j] = W[j] / T;
+            }
+
+            // cross-product norm squared ||What ^ V||^2 via Lagrange identity to avoid cancellation
+            mjtNum det = 0;
+            for (int j=0; j < dim-1; j++) {
+              for (int k=j+1; k < dim-1; k++) {
+                mjtNum djk = What[j]*V[k] - What[k]*V[j];
+                det += djk*djk;
+              }
+            }
+
+            // derivatives
+            mjtNum N1 = V0;
+            mjtNum T1 = WV / T;
+            deriv[0] += Dm*(N-mu*T)*(N1-mu*T1);
+            deriv[1] += Dm*((N1-mu*T1)*(N1-mu*T1) + (N/T - mu)*(-mu*det));
+          }
+        }
+
+        // advance to next constraint
+        i += (dim-1);
+      } else {                                                  // inequality
+        // search point
+        mjtNum start = ctx->Jaref[i];
+        mjtNum x = start + alpha*ctx->Jv[i];
+        mjtNum cost0 = start < 0 ? ctx->quad[3*i] : 0;
+
+        // active
+        if (x < 0) {
+          // shifted quad: add quad[1], quad[2] and (quad[0] - cost0)
+          quadTotal[0] += ctx->quad[3*i] - cost0;
+          quadTotal[1] += ctx->quad[3*i+1];
+          quadTotal[2] += ctx->quad[3*i+2];
+        } else {
+          cost -= cost0;
+        }
       }
     }
   }
@@ -2990,13 +3062,13 @@ static int MakeHessian(const mjModel* m, mjData* d, mjPrimalContext* ctx) {
 
     // count total and row non-zeros of reverse-Cholesky factors L and LT
     ctx->nL = mju_cholFactorSymbolic(NULL, ctx->L_rownnz, ctx->L_rowadr, NULL,
-                                     ctx->LT_rownnz, ctx->LT_rowadr, NULL,
+                                     ctx->LT_rownnz, ctx->LT_rowadr, NULL, NULL,
                                      ctx->HT_rownnz, ctx->HT_rowadr, ctx->HT_colind,
                                      nv, d);
 
     // nL is known: check stack space, then allocate L_colind, LT_colind, LT_map, L, Lcone
-    // L_colind + LT_colind + LT_map + pathcost
-    size_t nL_int = 3*(size_t)ctx->nL + (size_t)nv;
+    // L_colind + LT_colind + LT_map + pathcost + L_super
+    size_t nL_int = 3*(size_t)ctx->nL + 2*(size_t)nv;
     size_t nL_num = ctx->is_elliptic ? 2*(size_t)ctx->nL : (size_t)ctx->nL;  // L + Lcone
     size_t L_bytes =
         mj_stackBytes(nL_int * sizeof(int), _Alignof(int)) +
@@ -3013,13 +3085,14 @@ static int MakeHessian(const mjModel* m, mjData* d, mjPrimalContext* ctx) {
     ctx->LT_colind     = L_intblock + ctx->nL;
     ctx->LT_map        = L_intblock + 2*ctx->nL;
     ctx->pathcost      = L_intblock + 3*ctx->nL;
+    ctx->L_super       = L_intblock + 3*ctx->nL + nv;
     ctx->L             = L_numblock;
     ctx->Lcone         = ctx->is_elliptic ? L_numblock + ctx->nL : NULL;
 
     // symbolic Cholesky: populate L_colind and LT structures
     mju_cholFactorSymbolic(ctx->L_colind, ctx->L_rownnz, ctx->L_rowadr,
                            ctx->LT_colind, ctx->LT_rownnz, ctx->LT_rowadr, ctx->LT_map,
-                           ctx->HT_rownnz, ctx->HT_rowadr, ctx->HT_colind,
+                           ctx->L_super, ctx->HT_rownnz, ctx->HT_rowadr, ctx->HT_colind,
                            nv, d);
 
     // fold gate inputs, fixed for the solve since the L pattern is fixed:
@@ -3175,8 +3248,8 @@ static void FactorizeHessian(mjData* d, mjPrimalContext* ctx, int flg_recompute)
       mju_cholFactorNumeric(
           ctx->L, nv, mjMINVAL,
           ctx->L_rownnz, ctx->L_rowadr, ctx->L_colind,
-          ctx->LT_rownnz, ctx->LT_rowadr, ctx->LT_colind, ctx->LT_map,
-          ctx->H, ctx->H_rownnz, ctx->H_rowadr, ctx->H_colind, ctx->cholscratch);
+          ctx->LT_rownnz, ctx->LT_rowadr, ctx->LT_colind, ctx->LT_map, ctx->L_super,
+          ctx->H, ctx->H_rownnz, ctx->H_rowadr, ctx->H_colind, (int*)ctx->cholscratch);
       ctx->flg_Lvalid = 1;
     }
   }
@@ -3245,9 +3318,9 @@ static void HessianConeFolded(mjData* d, mjPrimalContext* ctx) {
   int rank = mju_cholFactorNumeric(
       ctx->Lcone, nv, mjMINVAL,
       ctx->L_rownnz, ctx->L_rowadr, ctx->L_colind,
-      ctx->LT_rownnz, ctx->LT_rowadr, ctx->LT_colind, ctx->LT_map,
+      ctx->LT_rownnz, ctx->LT_rowadr, ctx->LT_colind, ctx->LT_map, ctx->L_super,
       Hcone, ctx->H_rownnz, ctx->H_rowadr, ctx->H_colind,
-      ctx->cholscratch);
+      (int*)ctx->cholscratch);
   if (rank < nv && ctx->flg_Hdirty) {
     FactorizeHessian(d, ctx, /*flg_recompute=*/1);
   }
@@ -3500,8 +3573,8 @@ static void HessianIncremental(mjData* d, mjPrimalContext* ctx, const int* oldst
     rank = mju_cholFactorNumeric(
         ctx->L, nv, mjMINVAL,
         ctx->L_rownnz, ctx->L_rowadr, ctx->L_colind,
-        ctx->LT_rownnz, ctx->LT_rowadr, ctx->LT_colind, ctx->LT_map,
-        ctx->H, ctx->H_rownnz, ctx->H_rowadr, ctx->H_colind, ctx->cholscratch);
+        ctx->LT_rownnz, ctx->LT_rowadr, ctx->LT_colind, ctx->LT_map, ctx->L_super,
+        ctx->H, ctx->H_rownnz, ctx->H_rowadr, ctx->H_colind, (int*)ctx->cholscratch);
     ctx->flg_Lvalid = 1;
     if (rank < nv && ctx->flg_Hdirty) {
       FactorizeHessian(d, ctx, /*flg_recompute=*/1);

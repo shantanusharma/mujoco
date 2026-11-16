@@ -16,7 +16,9 @@
 
 #include <algorithm>
 #include <array>
+#include <climits>
 #include <cstddef>
+#include <cstdint>
 #include <cstdio>
 #include <cstring>
 #include <optional>
@@ -2147,6 +2149,12 @@ void mjXWriter::Visual(XMLElement* root) {
   for (const auto& sub : subs) {
     XMLElement* elem = InsertEnd(section, sub.tag);
     WriteAttrTable(elem, vis, &visdef, sub.rows, sub.n, authored_);
+    if (sub.rows == kHeadlightAttrs) {
+      int  value         = std::clamp(vis->headlight.active, 0, 2);
+      bool elem_authored = authored_ && mjs_isAuthored(&model->spec, &vis->headlight.active);
+      int  def           = elem_authored ? kDefaultUnauthoredValue : visdef.headlight.active;
+      WriteAttrKey(elem, "active", FalseTrueAuto_map, 3, value, def);
+    }
     if (!elem->FirstAttribute()) { section->DeleteChild(elem); }
   }
 
@@ -2451,8 +2459,15 @@ void mjXWriter::Asset(XMLElement* root) {
       const std::vector<float>& userdata =
           authored_ ? phfield->spec_userdata_ : phfield->get_userdata();
       if (!userdata.empty()) {
+        if (nrow <= 0 || ncol <= 0 || (int64_t)nrow * (int64_t)ncol > INT_MAX) {
+          throw mjXError(0, "invalid hfield dimensions in XML write");
+        }
+        size_t npix = (size_t)nrow * (size_t)ncol;
+        if (userdata.size() != npix) {
+          throw mjXError(0, "elevation data length must match nrow*ncol");
+        }
         // copy in reverse row order, so XML string is top-to-bottom
-        std::vector<float> flipped(nrow * ncol);
+        std::vector<float> flipped(npix);
         for (int i = 0; i < nrow; i++) {
           int flip = nrow - 1 - i;
           for (int j = 0; j < ncol; j++) { flipped[i * ncol + j] = userdata[flip * ncol + j]; }
@@ -2923,11 +2938,9 @@ void mjXWriter::Sensor(XMLElement* root) {
 
   // write all sensors
   for (int i = 0; i < num; i++) {
-    XMLElement*      elem          = 0;
-    mjCSensor*       base          = model->Sensors()[i];
-    const mjsSensor* sensor        = Values<mjsSensor>(base);
-    string           instance_name = "";
-    string           plugin_name   = "";
+    XMLElement*      elem   = 0;
+    mjCSensor*       base   = model->Sensors()[i];
+    const mjsSensor* sensor = Values<mjsSensor>(base);
 
     // write sensor type and type-specific attributes
     switch (sensor->type) {

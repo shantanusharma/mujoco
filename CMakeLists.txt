@@ -29,7 +29,7 @@ set(MSVC_INCREMENTAL_DEFAULT ON)
 
 project(
   mujoco
-  VERSION 4.0.0
+  VERSION 4.0.2
   DESCRIPTION "MuJoCo Physics Simulator"
   HOMEPAGE_URL "https://mujoco.org"
 )
@@ -316,16 +316,6 @@ if(MUJOCO_WITH_USD)
     DIRECTORY ${USD_INSTALL_ROOT}/
     DESTINATION ${CMAKE_INSTALL_LIBDIR}
   )
-
-  if(APPLE)
-    set_target_properties(mujoco PROPERTIES
-      BUILD_RPATH "${USD_INSTALL_ROOT}"
-      INSTALL_RPATH "@loader_path")
-  elseif(UNIX)
-    set_target_properties(mujoco PROPERTIES
-      BUILD_RPATH "${USD_INSTALL_ROOT}"
-      INSTALL_RPATH "$ORIGIN")
-  endif()
 
   add_subdirectory(src/experimental/usd)
   add_subdirectory(plugin/usd_decoder)

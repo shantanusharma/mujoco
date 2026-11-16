@@ -29,26 +29,18 @@
 #include <vector>
 
 #include <imgui.h>
+#include <mujoco/mjrfilament.h>
 #include <mujoco/mujoco.h>
 #include "studio/sim/sim_history.h"
 #include "studio/sim/sim_profiler.h"
 #include "studio/sim/step_control.h"
+#include "studio/ux/theme.h"
 
 namespace mujoco::studio {
-
-// Standard default UX themes for MuJoCo applications.
-enum class GuiTheme {
-  kLight,
-  kDark,
-  kClassic,
-};
 
 // Render a section header with custom, visually-balanced smaller
 // expand/collapse arrow.
 bool SectionHeader(const char* label, ImGuiTreeNodeFlags flags = 0, float arrow_scale = 0.55f);
-
-// Updates the ImGui internal style state to match the requested theme.
-void SetupTheme(GuiTheme theme);
 
 // Returns the default INI settings file path (~/.mujoco.ini).
 std::string GetDefaultIniPath();
@@ -192,13 +184,23 @@ std::string GetCameraName(const mjModel* model, const mjvCamera& camera, int ind
 // UX for selecting the camera.
 bool CameraSelectionGui(const mjModel* model, mjData* data, mjvCamera& camera, int& index);
 
+// Transient camera animation state of ViewGizmoGui, owned by the caller.
+struct ViewGizmoAnimation {
+  double start_time = -1.0;  // negative when idle
+  double start_azimuth = 0;
+  double start_elevation = 0;
+  double target_azimuth = 0;
+  double target_elevation = 0;
+};
+
 // XYZ axes in the top-right corner of the 3D view (`workspace_rect`, from
 // ConfigureDockingLayout) that turn with the camera. Clicking an axis animates
 // the camera to look along it, or from the other side if it already does;
 // dragging orbits the camera. A fixed camera is first swapped for the tumble
-// camera, updating `camera_index`. Returns true if the camera changed.
+// camera, updating `camera_index`. The animation progress is kept in
+// `animation`. Returns true if the camera changed.
 bool ViewGizmoGui(const mjModel* model, const mjData* data, mjvCamera& camera, int& camera_index,
-                  const ImVec4& workspace_rect);
+                  ViewGizmoAnimation& animation, const ImVec4& workspace_rect);
 
 // UX for controlling the physics simulation parameters (e.g. integrator,
 // solver, etc.) in mjOption.
@@ -212,6 +214,9 @@ void GroupsGui(const mjModel* model, mjvOption* vis_options, float min_width);
 // of flags are closely related.
 void RenderingGui(const mjModel* model, mjvOption* vis_options, mjtByte* render_flags,
                   float min_width);
+
+// UX for the mjrfRenderOpts struct and the draw mode.
+void RenderOptsGui(mjrfRenderOpts* render_opts, mjrDrawMode* draw_mode);
 
 // UX for controlling the mjvOption and mjvCamera settings used for visualizing
 // scenes (mjvScene).

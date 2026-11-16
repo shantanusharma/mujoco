@@ -1,12 +1,16 @@
 ---
 name: mujoco-rendering
 description: >-
-  Offscreen image rendering, Python Renderer class, C++ pipeline (mjrContext,
-  mjvScene, mjr_render, mjr_readPixels), RGB, metric depth maps, segmentation
-  masks (mjtObj), offwidth/offheight framebuffer sizing, MUJOCO_GL (osmesa, egl),
-  cameras (fixed, tracking, free, MjvCamera), scene options (geomgroup, flags).
-  Use for headless camera rendering, dataset recording, visual observations.
-  Do NOT use for interactive viewers/Studio (mujoco-studio) or ImGui controls (mujoco-gui).
+  MuJoCo offscreen image rendering using mujoco.Renderer in Python and the
+  MuJoCo C/C++ rendering pipeline (mjrContext, mjvScene, mjr_render,
+  mjr_readPixels): RGB, metric depth maps, segmentation masks (mjtObj), MJCF
+  offwidth/offheight framebuffer sizing, MUJOCO_GL (osmesa, egl), MuJoCo
+  cameras (fixed, tracking, free, MjvCamera), and mjvOption flags/geomgroup.
+  Use only for headless camera rendering, dataset recording, and visual
+  observations in MuJoCo simulations. Don't use for generic OpenGL/EGL/OSMesa
+  offscreen rendering, glReadPixels depth/segmentation post-processing, or
+  synthetic dataset pipelines that do not use the `mujoco` library, or for
+  interactive viewers/Studio (mujoco-studio) or ImGui controls (mujoco-gui).
 ---
 
 # MuJoCo Rendering: Cameras, Contexts & Offscreen Buffers
@@ -21,7 +25,9 @@ description: >-
 > reference files like [`../../python.rst`](../../python.rst) (`.. _PyRender:`),
 > [`../../XMLreference.rst`](../../XMLreference.rst), and
 > [`../../APIreference/functions.rst`](../../APIreference/functions.rst), grep
-> the literal `.. _Label:` anchor. Outside a checkout, fetch
+> the literal `.. _Label:` anchor. Outside a checkout, the same `doc/*.rst` tree
+> ships offline in `pip install mujoco` at
+> `pathlib.Path(mujoco.__file__).parent / 'doc'`; otherwise fetch
 > `https://mujoco.readthedocs.io/en/latest/<path>.html` (or `/en/stable/` for
 > released pages; `functions.rst` renders inside
 > `APIreference/APIfunctions.html`, and Sphinx anchors lowercase the label,
@@ -315,8 +321,7 @@ OpenGL, Vulkan, Metal, and WebGL support, arbitrary `mjrfRenderTarget` sizes
 -   [C Rendering API Functions](../../APIreference/functions.rst)
     (`.. _Visualization-api:`, `.. _OpenGLrendering:`,
     `.. _FilamentRenderingApi:`) and
-    [C++ Render/Record Samples](../../programming/samples.rst) (`.. _saRender:`,
-    `.. _saRecord:`)
+    [C++ Render Sample](../../programming/samples.rst) (`.. _saRender:`)
 
 ### Source Code & Model Examples
 

@@ -40,7 +40,6 @@
 #include "engine/engine_util_blas.h"
 #include "engine/engine_util_errmem.h"
 #include "engine/engine_util_misc.h"
-#include "engine/engine_util_solve.h"
 #include "engine/engine_util_spatial.h"
 
 
@@ -200,7 +199,70 @@ static mjtNum planeGeomDist(const mjModel* m, mjData* d, int g1, int g2) {
 }
 
 
-// return 1 if body has plane geom, 0 otherwise
+// filter contact based on type and affinity
+static inline int filterBitmask(int contype1, int conaffinity1,
+                                int contype2, int conaffinity2) {
+  return !(contype1 & conaffinity2) && !(contype2 & conaffinity1);
+}
+
+
+// return 1 if geoms g1 and g2 cannot collide by bitmask, 0 otherwise
+static inline int filterGeomPair(const mjModel* m, int g1, int g2) {
+  return filterBitmask(m->geom_contype[g1], m->geom_conaffinity[g1],
+                       m->geom_contype[g2], m->geom_conaffinity[g2]);
+}
+
+
+// return 1 if geom g and body b cannot collide by bitmask, 0 otherwise
+static inline int filterGeomBody(const mjModel* m, int g, int b) {
+  return filterBitmask(m->geom_contype[g], m->geom_conaffinity[g],
+                       m->body_contype[b], m->body_conaffinity[b]);
+}
+
+
+// return 1 if geom g and flex f cannot collide by bitmask, 0 otherwise
+static inline int filterGeomFlex(const mjModel* m, int g, int f) {
+  return filterBitmask(m->geom_contype[g], m->geom_conaffinity[g],
+                       m->flex_contype[f], m->flex_conaffinity[f]);
+}
+
+
+// return 1 if geom can collide, 0 otherwise
+static inline int geomCollidable(const mjModel* m, int g) {
+  return m->geom_contype[g] || m->geom_conaffinity[g];
+}
+
+
+// return 1 if flex can collide, 0 otherwise
+static inline int flexCollidable(const mjModel* m, int f) {
+  return m->flex_contype[f] || m->flex_conaffinity[f];
+}
+
+
+// return 1 if body can collide, 0 otherwise
+static inline int bodyCollidable(const mjModel* m, int b) {
+  return m->body_contype[b] || m->body_conaffinity[b];
+}
+
+
+// return 1 if bodyflex can collide, 0 otherwise
+static inline int collidable(const mjModel* m, int bf) {
+  return (bf < m->nbody) ? bodyCollidable(m, bf) : flexCollidable(m, bf - m->nbody);
+}
+
+
+// return 1 if two bodyflexes can collide, 0 otherwise
+static inline int pairCollidable(const mjModel* m, int bf1, int bf2) {
+  int f1 = bf1 - m->nbody, f2 = bf2 - m->nbody;
+  int contype1 = (f1 < 0) ? m->body_contype[bf1] : m->flex_contype[f1];
+  int conaffinity1 = (f1 < 0) ? m->body_conaffinity[bf1] : m->flex_conaffinity[f1];
+  int contype2 = (f2 < 0) ? m->body_contype[bf2] : m->flex_contype[f2];
+  int conaffinity2 = (f2 < 0) ? m->body_conaffinity[bf2] : m->flex_conaffinity[f2];
+  return !filterBitmask(contype1, conaffinity1, contype2, conaffinity2);
+}
+
+
+// return 1 if body has collidable plane geom, 0 otherwise
 static int hasPlane(const mjModel* m, int body) {
   int start = m->body_geomadr[body];
   int end = m->body_geomadr[body] + m->body_geomnum[body];
@@ -208,19 +270,12 @@ static int hasPlane(const mjModel* m, int body) {
   // scan geoms belonging to body
   int g;
   for (g=start; g < end; g++) {
-    if (m->geom_type[g] == mjGEOM_PLANE) {
+    if (m->geom_type[g] == mjGEOM_PLANE && (mjcb_contactfilter || geomCollidable(m, g))) {
       return 1;
     }
   }
 
   return 0;
-}
-
-
-// filter contact based on type and affinity
-static int filterBitmask(int contype1, int conaffinity1,
-                         int contype2, int conaffinity2) {
-  return !(contype1 & conaffinity2) && !(contype2 & conaffinity1);
 }
 
 
@@ -299,26 +354,34 @@ static int bodyPairHasFastGeom(const mjModel* m, const mjData* d, int b1, int b2
   mjtNum min_size = mjMAXVAL;
   for (int i = 0; i < num1; i++) {
     int g = adr1 + i;
-    if (m->geom_type[g] != mjGEOM_PLANE && mjc_GeomSupported(m->geom_type[g])) {
-      min_size = mju_min(min_size, geomMinSize(m, g));
+    if ((!mjcb_contactfilter && filterGeomBody(m, g, b2)) ||
+        m->geom_type[g] == mjGEOM_PLANE || !mjc_GeomSupported(m->geom_type[g])) {
+      continue;
     }
+    min_size = mju_min(min_size, geomMinSize(m, g));
   }
   for (int i = 0; i < num2; i++) {
     int g = adr2 + i;
-    if (m->geom_type[g] != mjGEOM_PLANE && mjc_GeomSupported(m->geom_type[g])) {
-      min_size = mju_min(min_size, geomMinSize(m, g));
+    if ((!mjcb_contactfilter && filterGeomBody(m, g, b1)) ||
+        m->geom_type[g] == mjGEOM_PLANE || !mjc_GeomSupported(m->geom_type[g])) {
+      continue;
     }
+    min_size = mju_min(min_size, geomMinSize(m, g));
   }
   if (min_size >= mjMAXVAL) {
     return 0;
   }
   for (int i = 0; i < num1; i++) {
-    if (geomStepSweep(m, d, adr1 + i, min_size, NULL, NULL) > 0) {
+    int g = adr1 + i;
+    if ((mjcb_contactfilter || !filterGeomBody(m, g, b2)) &&
+        geomStepSweep(m, d, g, min_size, NULL, NULL) > 0) {
       return 1;
     }
   }
   for (int i = 0; i < num2; i++) {
-    if (geomStepSweep(m, d, adr2 + i, min_size, NULL, NULL) > 0) {
+    int g = adr2 + i;
+    if ((mjcb_contactfilter || !filterGeomBody(m, g, b1)) &&
+        geomStepSweep(m, d, g, min_size, NULL, NULL) > 0) {
       return 1;
     }
   }
@@ -389,61 +452,48 @@ static int mj_filterSphere(const mjModel* m, mjData* d, int g1, int g2, mjtNum m
 
 
 // filter body pair; 1: discard, 0: proceed
-static int filterBodyPair(int weldbody1, int weldparent1, int asleep1, int dofnum1,
-                          int weldbody2, int weldparent2, int asleep2, int dofnum2,
-                          int dsbl_filterparent) {
+static int filterBodyPair(const mjModel* m, const mjData* d, int b1, int b2,
+                          int dsbl_filterparent, int sleep_filter) {
+  int weldbody1 = m->body_weldid[b1];
+  int weldbody2 = m->body_weldid[b2];
+
   // same weldbody check
   if (weldbody1 == weldbody2) {
     return 1;
   }
 
   // both dof-less: no forces can act, skip
-  if (dofnum1 == 0 && dofnum2 == 0) {
+  if (m->body_dofnum[weldbody1] == 0 && m->body_dofnum[weldbody2] == 0) {
     return 1;
   }
 
-  // both asleep check
-  if (asleep1 && asleep2) {
-    return 1;
-  }
+  // sleep checks
+  if (sleep_filter) {
+    int asleep1 = (d->body_awake[b1] == mjS_ASLEEP);
+    int asleep2 = (d->body_awake[b2] == mjS_ASLEEP);
 
-  // asleep and world-static check (mocap has weldbody != 0, still triggers wake)
-  if ((asleep1 && !weldbody2) || (asleep2 && !weldbody1)) {
-    return 1;
+    // both asleep check
+    if (asleep1 && asleep2) {
+      return 1;
+    }
+
+    // asleep and world-static check (mocap has weldbody != 0, still triggers wake)
+    if ((asleep1 && !weldbody2) || (asleep2 && !weldbody1)) {
+      return 1;
+    }
   }
 
   // weldparent check
-  if ((!dsbl_filterparent && weldbody1 != 0 && weldbody2 != 0) &&
-      (weldbody1 == weldparent2 || weldbody2 == weldparent1)) {
-    return 1;
+  if (!dsbl_filterparent && weldbody1 != 0 && weldbody2 != 0) {
+    int weldparent1 = m->body_weldid[m->body_parentid[weldbody1]];
+    int weldparent2 = m->body_weldid[m->body_parentid[weldbody2]];
+    if (weldbody1 == weldparent2 || weldbody2 == weldparent1) {
+      return 1;
+    }
   }
 
   // all tests passed
   return 0;
-}
-
-
-// return 1 if bodyflex can collide, 0 otherwise
-static int canCollide(const mjModel* m, int bf) {
-  if (bf < m->nbody) {
-    return (m->body_contype[bf] || m->body_conaffinity[bf]);
-  } else {
-    int f = bf - m->nbody;
-    return (m->flex_contype[f] || m->flex_conaffinity[f]);
-  }
-}
-
-
-// return 1 if two bodyflexes can collide, 0 otherwise
-static int canCollide2(const mjModel* m, int bf1, int bf2) {
-  int nbody = m->nbody;
-  int contype1 = (bf1 < nbody) ? m->body_contype[bf1] : m->flex_contype[bf1-nbody];
-  int conaffinity1 = (bf1 < nbody) ? m->body_conaffinity[bf1] : m->flex_conaffinity[bf1-nbody];
-  int contype2 = (bf2 < nbody) ? m->body_contype[bf2] : m->flex_contype[bf2-nbody];
-  int conaffinity2 = (bf2 < nbody) ? m->body_conaffinity[bf2] : m->flex_conaffinity[bf2-nbody];
-
-  // opposite of bitmask filter
-  return (!filterBitmask(contype1, conaffinity1, contype2, conaffinity2));
 }
 
 
@@ -594,10 +644,9 @@ mjSORT(pairSort, mjcPair, pairCompare);
 static int pushPairArena(mjData* d, const mjcPair* pair, int npair) {
   // allocate geom pair on the arena
   mjcPair* new_pair = (mjcPair*) mj_arenaAllocByte(d, sizeof(mjcPair), _Alignof(mjcPair));
-  if (!new_pair) {
-    mjERROR("arena too small to allocate geom pair");
+  if (new_pair) {
+    *new_pair = *pair;
   }
-  *new_pair = *pair;
   return npair + 1;
 }
 
@@ -679,17 +728,24 @@ static int pushSelfElemElem(const mjModel* m, mjData* d, int f, int e1, int e2, 
 }
 
 
+// return 1 if (g1, g2) is in predefined pair range [startadr, pairadr), 0 otherwise
+static inline int isPairMerged(const mjModel* m, int g1, int g2, int startadr, int pairadr) {
+  for (int k=startadr; k < pairadr; k++) {
+    if ((m->pair_geom1[k] == g1 && m->pair_geom2[k] == g2) ||
+        (m->pair_geom1[k] == g2 && m->pair_geom2[k] == g1)) {
+      return 1;
+    }
+  }
+  return 0;
+}
+
+
 // filter candidate collision pair; return 0 if pair should be discarded
 static int filterCollisionPair(const mjModel* m, mjData* d, int g1, int g2, int ipair,
                                int merged, int startadr, int pairadr) {
   // merged, find matching pair
-  if (merged) {
-    for (int k=startadr; k < pairadr; k++) {
-      if ((m->pair_geom1[k] == g1 && m->pair_geom2[k] == g2) ||
-          (m->pair_geom1[k] == g2 && m->pair_geom2[k] == g1)) {
-        return 0;
-      }
-    }
+  if (merged && isPairMerged(m, g1, g2, startadr, pairadr)) {
+    return 0;
   }
 
   if (ipair >= 0) {
@@ -707,23 +763,35 @@ static int filterCollisionPair(const mjModel* m, mjData* d, int g1, int g2, int 
       if (mjcb_contactfilter(m, d, g1, g2)) {
         return 0;
       }
-    } else if (filterBitmask(m->geom_contype[g1], m->geom_conaffinity[g1],
-                             m->geom_contype[g2], m->geom_conaffinity[g2])) {
+    } else if (filterGeomPair(m, g1, g2)) {
       return 0;
     }
+  }
+
+  // check collision function is well-defined
+  int type1 = mjMIN(m->geom_type[g1], m->geom_type[g2]);
+  int type2 = mjMAX(m->geom_type[g1], m->geom_type[g2]);
+  if (!mjCOLLISIONFUNC[type1][type2]) {
+    return 0;
   }
 
   // bounding sphere filter
   mjtNum margin = getMargin(m, g1, g2, ipair);
   mjtNum gap = getGap(m, g1, g2, ipair);
-  if (mj_filterSphere(m, d, g1, g2, margin + gap)) {
-    return 0;
-  }
+  return !mj_filterSphere(m, d, g1, g2, margin + gap);
+}
 
-  // highly unlikely, but check collision function is well-defined
-  int type1 = mjMIN(m->geom_type[g1], m->geom_type[g2]);
-  int type2 = mjMAX(m->geom_type[g1], m->geom_type[g2]);
-  return mjCOLLISIONFUNC[type1][type2] != NULL;
+
+// return single colliding geom id of body b if it has at most one, -1 otherwise
+static inline int singleBodyGeom(const mjModel* m, int b) {
+  if (m->body_geomnum[b] == 1) {
+    return m->body_geomadr[b];
+  }
+  if (!mjDISABLED(mjDSBL_MIDPHASE) && !m->vis.global.bvactive &&
+      !mjcb_contactfilter && m->body_bvhnum[b] == 1) {
+    return m->bvh_nodeid[m->body_bvhadr[b]];
+  }
+  return -1;
 }
 
 
@@ -796,11 +864,6 @@ void mj_collision(const mjModel* m, mjData* d) {
       }
     }
 
-    // apply bitmask filtering at the bodyflex level
-    if (!canCollide2(m, bf1, bf2)) {
-      continue;
-    }
-
     // under the ipc flag the IPC step resolves two dim-2 flexes itself
     if (bf1 >= nbody && bf2 >= nbody && mjc_ipcOwnsFlexFlex(m, bf1 - nbody, bf2 - nbody)) {
       continue;
@@ -827,10 +890,12 @@ void mj_collision(const mjModel* m, mjData* d) {
     int geomadr1 = (isbody1 ? m->body_geomadr[bf1] : -1);
     int geomadr2 = (isbody2 ? m->body_geomadr[bf2] : -1);
 
-    // process bodyflex pair: two single-geom bodies
-    if (isbody1 && isbody2 && m->body_geomnum[bf1] == 1 && m->body_geomnum[bf2] == 1) {
-      if (filterCollisionPair(m, d, geomadr1, geomadr2, -1, merged, startadr, pairadr)) {
-        ncandidate = pushGeomGeom(m, d, geomadr1, geomadr2, -1, ncandidate);
+    // process bodyflex pair: two single-colliding-geom bodies
+    int cg1 = isbody1 ? singleBodyGeom(m, bf1) : -1;
+    int cg2 = isbody2 ? singleBodyGeom(m, bf2) : -1;
+    if (cg1 >= 0 && cg2 >= 0) {
+      if (filterCollisionPair(m, d, cg1, cg2, -1, merged, startadr, pairadr)) {
+        ncandidate = pushGeomGeom(m, d, cg1, cg2, -1, ncandidate);
       }
     }
 
@@ -860,7 +925,13 @@ void mj_collision(const mjModel* m, mjData* d) {
       // body : body
       if (isbody1 && isbody2) {
         for (g1=geomadr1; g1 < geomadr_end1; g1++) {
+          if (!mjcb_contactfilter && filterGeomBody(m, g1, bf2)) {
+            continue;
+          }
           for (g2=geomadr2; g2 < geomadr_end2; g2++) {
+            if (!mjcb_contactfilter && filterGeomPair(m, g1, g2)) {
+              continue;
+            }
             if (filterCollisionPair(m, d, g1, g2, -1, merged, startadr, pairadr)) {
               ncandidate = pushGeomGeom(m, d, g1, g2, -1, ncandidate);
             }
@@ -875,8 +946,7 @@ void mj_collision(const mjModel* m, mjData* d) {
         // process body geoms
         for (int g=m->body_geomadr[bf1]; g < geomadr_end1; g++) {
           // bitmask filtering at the geom-flex level
-          if (filterBitmask(m->geom_contype[g], m->geom_conaffinity[g],
-                            m->flex_contype[f], m->flex_conaffinity[f])) {
+          if (filterGeomFlex(m, g, f)) {
             continue;
           }
 
@@ -989,9 +1059,15 @@ void mj_collision(const mjModel* m, mjData* d) {
     }
   }
 
+  // warn if candidate pairs overflowed the arena
+  int npair_arena = (int)((d->parena - parena) / sizeof(mjcPair));
+  if (ncandidate > npair_arena) {
+    mj_warning(d, mjWARN_CONTACTFULL, ncandidate);
+  }
+
   // narrowphase: compute contacts for all candidate pairs in a single global call
-  if (ncandidate > 0) {
-    mj_narrowphase(m, d, ncandidate, parena);
+  if (npair_arena > 0) {
+    mj_narrowphase(m, d, npair_arena, parena);
   }
 
   // end narrowphase and midphase timer
@@ -1132,11 +1208,6 @@ static int mj_collideTree(const mjModel* m, mjData* d, int bf1, int bf2,
   mjtNum offset[12];   // 2 bb x 2 bb x 3 axes (world)
   mjtBool initialize = true;
 
-  // bitmask filter for bodyflex pair
-  if (!canCollide2(m, bf1, bf2)) {
-    return npair;
-  }
-
   mj_markStack(d);
   // TODO(b/273737633): Store bvh max depths to make this bound tighter.
   const int max_stack = (isbody1 ? m->body_bvhnum[bf1] : m->flex_bvhnum[f1]) +
@@ -1145,15 +1216,13 @@ static int mj_collideTree(const mjModel* m, mjData* d, int bf1, int bf2,
 
   int nstack = 1;
   stack[0].node1 = stack[0].node2 = 0;
-  int start_pair = npair;
+  int start_pair = (int)((d->parena - parena) / sizeof(mjcPair));
 
   // for body:flex, if dof-less body has planes, call pushGeomFlex
   if (isbody1 && !isbody2 && m->body_dofnum[m->body_weldid[bf1]] == 0) {
     for (int i=geomadr1; i < geomadr1+m->body_geomnum[bf1]; i++) {
       if (m->geom_type[i] == mjGEOM_PLANE) {
-        if (!filterBitmask(m->geom_contype[i], m->geom_conaffinity[i],
-                           m->flex_contype[f2], m->flex_conaffinity[f2]) &&
-            !mjc_ipcOwnsFlexGeom(m, f2, i)) {
+        if (!filterGeomFlex(m, i, f2) && !mjc_ipcOwnsFlexGeom(m, f2, i)) {
           npair = pushGeomFlex(d, i, f2, geomGroup(group, i, geomadr1), npair);
         }
       }
@@ -1164,9 +1233,7 @@ static int mj_collideTree(const mjModel* m, mjData* d, int bf1, int bf2,
   if (isbody1 && !isbody2) {
     for (int i=geomadr1; i < geomadr1+m->body_geomnum[bf1]; i++) {
       if (m->geom_type[i] == mjGEOM_SDF) {
-        if (m->flex_dim[f2] == 2 &&
-            !filterBitmask(m->geom_contype[i], m->geom_conaffinity[i],
-                           m->flex_contype[f2], m->flex_conaffinity[f2])) {
+        if (m->flex_dim[f2] == 2 && !filterGeomFlex(m, i, f2)) {
           npair = pushGeomFlex(d, i, f2, geomGroup(group, i, geomadr1), npair);
         }
       }
@@ -1198,6 +1265,18 @@ static int mj_collideTree(const mjModel* m, mjData* d, int bf1, int bf2,
     if (isbody1 && isbody2) {
       // both are leaves
       if (isleaf1 && isleaf2) {
+        if (merged && isPairMerged(m, nodeid1, nodeid2, startadr, pairadr)) {
+          continue;
+        }
+        if (!mjcb_contactfilter && filterGeomPair(m, nodeid1, nodeid2)) {
+          continue;
+        }
+        int type1 = mjMIN(m->geom_type[nodeid1], m->geom_type[nodeid2]);
+        int type2 = mjMAX(m->geom_type[nodeid1], m->geom_type[nodeid2]);
+        if (!mjCOLLISIONFUNC[type1][type2]) {
+          continue;
+        }
+
         mjtNum margin = mj_assignMargin(m, m->geom_margin[nodeid1] + m->geom_margin[nodeid2]);
         mjtNum gap = m->geom_gap[nodeid1] + m->geom_gap[nodeid2];
 
@@ -1206,7 +1285,7 @@ static int mj_collideTree(const mjModel* m, mjData* d, int bf1, int bf2,
                             d->geom_xpos + 3*nodeid1, d->geom_xmat + 9*nodeid1,
                             d->geom_xpos + 3*nodeid2, d->geom_xmat + 9*nodeid2,
                             margin + gap, NULL, NULL, &initialize)) {
-            if (filterCollisionPair(m, d, nodeid1, nodeid2, -1, merged, startadr, pairadr)) {
+            if (!mjcb_contactfilter || !mjcb_contactfilter(m, d, nodeid1, nodeid2)) {
               npair = pushGeomGeom(m, d, nodeid1, nodeid2, -1, npair);
             }
             if (mark_active) {
@@ -1215,6 +1294,13 @@ static int mj_collideTree(const mjModel* m, mjData* d, int bf1, int bf2,
             }
           }
         }
+        continue;
+      }
+
+      // prune subtree if leaf geom cannot collide with the other body's bitmask
+      if (!mjcb_contactfilter &&
+          ((isleaf1 && filterGeomBody(m, nodeid1, bf2)) ||
+           (isleaf2 && filterGeomBody(m, nodeid2, bf1)))) {
         continue;
       }
 
@@ -1235,8 +1321,7 @@ static int mj_collideTree(const mjModel* m, mjData* d, int bf1, int bf2,
         mjtNum margin = mj_assignMargin(m, m->geom_margin[nodeid1] + m->flex_margin[f2]);
         mjtNum gap = m->geom_gap[nodeid1] + m->flex_gap[f2];
 
-        if (!filterBitmask(m->geom_contype[nodeid1], m->geom_conaffinity[nodeid1],
-                           m->flex_contype[f2], m->flex_conaffinity[f2]) &&
+        if (!filterGeomFlex(m, nodeid1, f2) &&
             !filterSphereBox(d->geom_xpos + 3*nodeid1, m->geom_rbound[nodeid1] + margin + gap,
                              bvh2 + 6*node2)) {
           if (mj_collideOBB(m->geom_aabb + 6*nodeid1, bvh2 + 6*node2,
@@ -1257,6 +1342,11 @@ static int mj_collideTree(const mjModel* m, mjData* d, int bf1, int bf2,
             }
           }
         }
+        continue;
+      }
+
+      // prune flex subtree if leaf geom cannot collide with flex bitmask
+      if (isleaf1 && filterGeomFlex(m, nodeid1, f2)) {
         continue;
       }
 
@@ -1288,13 +1378,13 @@ static int mj_collideTree(const mjModel* m, mjData* d, int bf1, int bf2,
         }
         if (!filterBox(d->flexelem_aabb + 6*(m->flex_elemadr[f1] + nodeid1),
                        d->flexelem_aabb + 6*(m->flex_elemadr[f2] + nodeid2), margin)) {
-          int npair_old = npair;
+          size_t parena_old = d->parena;
           if (bf1 != bf2) {
             npair = pushElemElem(d, f1, nodeid1, f2, nodeid2, group, npair);
           } else if (nodeid1 != nodeid2) {
             npair = pushSelfElemElem(m, d, f1, nodeid1, nodeid2, group, npair);
           }
-          if (mark_active && npair > npair_old) {
+          if (mark_active && d->parena > parena_old) {
             d->bvh_active[node1 + bvhadr1] = true;
             d->bvh_active[node2 + bvhadr2] = true;
           }
@@ -1315,8 +1405,22 @@ static int mj_collideTree(const mjModel* m, mjData* d, int bf1, int bf2,
       d->bvh_active[node2 + bvhadr2] = true;
     }
 
-    // keep traversing the tree
+    // keep traversing the tree: expand node1 or node2
+    mjtBool expand1;
     if (!isleaf1 && isleaf2) {
+      expand1 = 1;
+    } else if (isleaf1 && !isleaf2) {
+      expand1 = 0;
+    } else {
+      // compute surface areas of bounding boxes (center, size): use half-sizes
+      mjtNum x1 = bvh1[6*node1+3], y1 = bvh1[6*node1+4], z1 = bvh1[6*node1+5];
+      mjtNum x2 = bvh2[6*node2+3], y2 = bvh2[6*node2+4], z2 = bvh2[6*node2+5];
+      mjtNum surface1 = x1*y1 + y1*z1 + z1*x1;
+      mjtNum surface2 = x2*y2 + y2*z2 + z2*x2;
+      expand1 = (surface1 > surface2);
+    }
+
+    if (expand1) {
       for (int i=0; i < 2; i++) {
         if (child1[2*node1+i] != -1) {
           if (nstack >= max_stack) {
@@ -1327,7 +1431,7 @@ static int mj_collideTree(const mjModel* m, mjData* d, int bf1, int bf2,
           nstack++;
         }
       }
-    } else if (isleaf1 && !isleaf2) {
+    } else {
       for (int i=0; i < 2; i++) {
         if (child2[2*node2+i] != -1) {
           if (nstack >= max_stack) {
@@ -1338,45 +1442,11 @@ static int mj_collideTree(const mjModel* m, mjData* d, int bf1, int bf2,
           nstack++;
         }
       }
-    } else {
-      // compute surface areas of bounding boxes (center, size): use half-sizes
-      mjtNum x1 = bvh1[6*node1+3];
-      mjtNum y1 = bvh1[6*node1+4];
-      mjtNum z1 = bvh1[6*node1+5];
-      mjtNum x2 = bvh2[6*node2+3];
-      mjtNum y2 = bvh2[6*node2+4];
-      mjtNum z2 = bvh2[6*node2+5];
-      mjtNum surface1 = x1*y1 + y1*z1 + z1*x1;
-      mjtNum surface2 = x2*y2 + y2*z2 + z2*x2;
-
-      // traverse the hierarchy whose bounding box has the larger surface area
-      if (surface1 > surface2) {
-        for (int i = 0; i < 2; i++) {
-          if (child1[2 * node1 + i] != -1) {
-            if (nstack >= max_stack) {
-              mjERROR("BVH stack depth exceeded.");  // SHOULD NOT OCCUR
-            }
-            stack[nstack].node1 = child1[2 * node1 + i];
-            stack[nstack].node2 = node2;
-            nstack++;
-          }
-        }
-      } else {
-        for (int i = 0; i < 2; i++) {
-          if (child2[2 * node2 + i] != -1) {
-            if (nstack >= max_stack) {
-              mjERROR("BVH stack depth exceeded.");  // SHOULD NOT OCCUR
-            }
-            stack[nstack].node1 = node1;
-            stack[nstack].node2 = child2[2*node2+i];
-            nstack++;
-          }
-        }
-      }
     }
   }
   // sort pairs generated by this tree collision
-  int n = npair - start_pair;
+  int end_pair = (int)((d->parena - parena) / sizeof(mjcPair));
+  int n = end_pair - start_pair;
   if (n > 1) {
     mjcPair* buf = mjSTACKALLOC(d, n, mjcPair);
     mjcPair* pairs = (mjcPair*) ((char*) d->arena + parena);
@@ -1395,17 +1465,22 @@ static void makeAAMM(const mjModel* m, mjData* d,
                      mjtNum* x_min, mjtNum* y_min, mjtNum* z_min,
                      mjtNum* x_max, mjtNum* y_max, mjtNum* z_max,
                      int bf, const mjtNum* frame) {
-  mjtNum aamm[6];
+  mjtNum aamm[6] = {0};
   mjtNum override_margin = mjENABLED(mjENBL_OVERRIDE) ? 0.5 * m->opt.o_margin : 0;
 
   // body
   if (bf < m->nbody) {
     int body = bf;
     int body_geomnum = m->body_geomnum[body];
+    int has_filter = (mjcb_contactfilter != NULL);
+    int first = 1;
 
-    // process all body geoms (body is collidable, should have geoms)
+    // process collidable body geoms (body is collidable, should have geoms)
     for (int i=0; i < body_geomnum; i++) {
       int geom = m->body_geomadr[body]+i;
+      if (!has_filter && !geomCollidable(m, geom)) {
+        continue;
+      }
       mjtNum margin = override_margin ? override_margin
                                        : m->geom_margin[geom] + m->geom_gap[geom];
       mjtNum _aamm[6];
@@ -1447,8 +1522,9 @@ static void makeAAMM(const mjModel* m, mjData* d,
       }
 
       // update body aamm
-      if (i == 0) {
+      if (first) {
         mju_copy(aamm, _aamm, 6);
+        first = 0;
       } else {
         for (int j=0; j < 3; j++) {
           aamm[j]   = mju_min(aamm[j],   _aamm[j]);
@@ -1509,50 +1585,15 @@ static void makeAAMM(const mjModel* m, mjData* d,
 
 
 // add bodyflex pair in buffer; do not filter if m is NULL
-static void add_pair(const mjModel* m, int bf1, int bf2,
+static void addPair(const mjModel* m, int bf1, int bf2,
                      int* npair, mjPacked32* pair, int maxpair) {
+  // contact filtering if m is not NULL
+  if (m && !pairCollidable(m, bf1, bf2)) {
+    return;
+  }
+
   // add pair if there is room in buffer
   if ((*npair) < maxpair) {
-    // contact filtering if m is not NULL
-    if (m) {
-      int nbody = m->nbody;
-      int contype1, conaffinity1, contype2, conaffinity2;
-
-      // get contype and conaffinity for bodyflex 1
-      if (bf1 < nbody) {
-        int body_geomadr1 = m->body_geomadr[bf1];
-        int body_geomnum1 = m->body_geomnum[bf1];
-        contype1 = conaffinity1 = 0;
-        for (int i=body_geomadr1; i < body_geomadr1+body_geomnum1; i++) {
-          contype1 |= m->geom_contype[i];
-          conaffinity1 |= m->geom_conaffinity[i];
-        }
-      } else {
-        contype1 = m->flex_contype[bf1-nbody];
-        conaffinity1 = m->flex_conaffinity[bf1-nbody];
-      }
-
-      // get contype and conaffinity for bodyflex 2
-      if (bf2 < nbody) {
-        int body_geomadr2 = m->body_geomadr[bf2];
-        int body_geomnum2 = m->body_geomnum[bf2];
-        contype2 = conaffinity2 = 0;
-        for (int i=body_geomadr2; i < body_geomadr2+body_geomnum2; i++) {
-          contype2 |= m->geom_contype[i];
-          conaffinity2 |= m->geom_conaffinity[i];
-        }
-      } else {
-        contype2 = m->flex_contype[bf2-nbody];
-        conaffinity2 = m->flex_conaffinity[bf2-nbody];
-      }
-
-      // compatibility check
-      if (!(contype1 & conaffinity2) && !(contype2 & conaffinity1)) {
-        return;
-      }
-    }
-
-    // add pair
     int n = (*npair)++;
     pair[n].hi = (bf1 < bf2) ? bf1 : bf2;
     pair[n].lo = (bf1 < bf2) ? bf2 : bf1;
@@ -1590,8 +1631,11 @@ mjSORT(SAPsort, mjtSAP, SAPcmp);
 
 // given list of axis-aligned bounding boxes in AAMM (min[3], max[3]) format,
 // return number of pairs that can collide, using sweep-and-prune along
-// specified x axis (0, 1 or 2).
-static int mj_SAP(mjData* d, const mjtNum* aamm, int n, int axis_x, mjPacked32* pair, int maxpair) {
+// specified x axis (0, 1 or 2). If active is non-NULL, pairs where neither
+// entry is active are skipped. If more than maxpair overlaps exist, only the
+// first maxpair are written to pair[] and maxpair + 1 is returned.
+static int mj_SAP(mjData* d, const mjtNum* aamm, const mjtByte* active, int n, int axis_x,
+                  mjPacked32* pair, int maxpair) {
   // check inputs
   if (n >= 0x10000 || axis_x < 0 || axis_x > 2 || maxpair < 1) {
     return -1;
@@ -1647,6 +1691,9 @@ static int mj_SAP(mjData* d, const mjtNum* aamm, int n, int axis_x, mjPacked32* 
         // and sortbuf[i].id_ismax is tested above
         int id1 = activebuf[j].id_ismax;
         int id2 = sortbuf[i].id_ismax;
+        if (active && !active[id1] && !active[id2]) {
+          continue;
+        }
 
         // use the other two axes to prune if possible
         if (y_min[id1] > y_max[id2] ||
@@ -1657,12 +1704,12 @@ static int mj_SAP(mjData* d, const mjtNum* aamm, int n, int axis_x, mjPacked32* 
         }
 
         // add pair, check buffer size
+        if (npair >= maxpair) {
+          return maxpair + 1;
+        }
         pair[npair].hi = id1;
         pair[npair].lo = id2;
         npair++;
-        if (npair >= maxpair) {
-          return maxpair;
-        }
       }
 
       // add to list
@@ -1723,158 +1770,173 @@ static inline int mjPacked32cmp(const mjPacked32* i, const mjPacked32* j, void* 
 mjSORT(bfsort, mjPacked32, mjPacked32cmp);
 
 
+// return 1 if body b is paired against all collidable bodies/flexes without SAP, 0 otherwise
+static inline int alwaysColliding(const mjModel* m, int b) {
+  return (b == 0 && m->body_geomnum[b] > 0) ||
+         (m->body_dofnum[m->body_weldid[b]] == 0 && hasPlane(m, b));
+}
+
+
 // broadphase collision detector
 static int mj_broadphase(const mjModel* m, mjData* d, mjPacked32* bfpair, int maxpair) {
-  int npair = 0, nbody = m->nbody, ngeom = m->ngeom;
-  int nvert = m->nflexvert, nflex = m->nflex, nbodyflex = m->nbody + m->nflex;
+  int npair = 0, nbody = m->nbody, ngeom = m->ngeom, nflex = m->nflex;
+  int nbodyflex = nbody + nflex;
   int dsbl_filterparent = mjDISABLED(mjDSBL_FILTERPARENT);
   int sleep_filter = mjENABLED(mjENBL_SLEEP) && d->nbody_awake < nbody;
+  int has_filter = (mjcb_contactfilter != NULL);
   mjtNum cov[9], cen[3], eigval[3], eigvec[9], frame[9], quat[4];
+
+  mj_markStack(d);
+  mjtByte* skip_sap = mjSTACKALLOC(d, nbody, mjtByte);
+  memset(skip_sap, 0, nbody);
 
   // init with pairs involving always-colliding bodies
   for (int b1=0; b1 < nbody; b1++) {
-    // cannot collide
-    if (!canCollide(m, b1)) {
+    if (!collidable(m, b1) || !alwaysColliding(m, b1)) {
       continue;
     }
+    skip_sap[b1] = 1;
 
-    // b1 is world body with geoms, or dof-less body with plane (static or mocap)
-    if ((b1 == 0 && m->body_geomnum[b1] > 0) ||
-        (m->body_dofnum[m->body_weldid[b1]] == 0 && hasPlane(m, b1))) {
-      int weld1 = m->body_weldid[b1];
-      int parent_weld1 = m->body_weldid[m->body_parentid[weld1]];
-      int dofnum1 = m->body_dofnum[weld1];
-
-      // add b1:b2 pairs that are not welded together
-      for (int b2=0; b2 < nbody; b2++) {
-        // cannot collide
-        if (!canCollide(m, b2)) {
-          continue;
-        }
-
-        int weld2 = m->body_weldid[b2];
-        int parent_weld2 = m->body_weldid[m->body_parentid[weld2]];
-        int asleep2 = sleep_filter ? d->body_awake[b2] == mjS_ASLEEP : 0;
-        int dofnum2 = m->body_dofnum[weld2];
-        if (filterBodyPair(weld1, parent_weld1, 0, dofnum1,
-                           weld2, parent_weld2, asleep2, dofnum2,
-                           dsbl_filterparent)) {
-          continue;
-        }
-
-        // add pair
-        add_pair(m, b1, b2, &npair, bfpair, maxpair);
-      }
-
-      // add body:flex pairs, skip if flex has no dofs (like b1) or is asleep
-      for (int f=0; f < nflex; f++) {
-        if (!hasAwakeDofs(m, d, nbody+f, sleep_filter)) continue;
-        add_pair(m, b1, nbody+f, &npair, bfpair, maxpair);
-      }
-    }
-  }
-
-  // find center of non-world geoms and flex vertices; return if none
-  int cnt = 0;
-  mju_zero3(cen);
-  for (int i=0; i < ngeom; i++) {
-    if (m->geom_bodyid[i]) {
-      mju_addTo3(cen, d->geom_xpos+3*i);
-      cnt++;
-    }
-  }
-  for (int i=0; i < nvert; i++) {
-    if (m->flex_vertbodyid[i]) {
-      mju_addTo3(cen, d->flexvert_xpos+3*i);
-      cnt++;
-    }
-  }
-  if (cnt == 0) {
-    return npair;
-  }
-  mju_scl3(cen, cen, 1.0/cnt);
-
-  // compute covariance
-  mju_zero(cov, 9);
-  for (int i=0; i < ngeom; i++) {
-    if (m->geom_bodyid[i]) {
-      updateCov(cov, d->geom_xpos+3*i, cen);
-    }
-  }
-  for (int i=0; i < nvert; i++) {
-    if (m->flex_vertbodyid[i]) {
-      updateCov(cov, d->flexvert_xpos+3*i, cen);
-    }
-  }
-  mju_scl(cov, cov, 1.0/cnt, 9);
-
-  // construct covariance-aligned 3D frame: eigenvectors are columns of eigvec, rows of frame
-  // SAP is exact in any frame, a rough one prunes as well
-  mju_eig3Tol(eigval, eigvec, quat, cov, 1e-3);
-  mji_transpose3(frame, eigvec);
-
-  // allocate collidable bodyflex ids, construct list
-  mj_markStack(d);
-  int* bfid = mjSTACKALLOC(d, nbodyflex, int);
-  int ncollide = 0;
-  for (int i=1; i < nbodyflex; i++) {
-    if (canCollide(m, i)) {
-      bfid[ncollide++] = i;
-    }
-  }
-
-  if (ncollide > 1) {
-    // allocate and construct AAMMs for collidable only
-    mjtNum* aamm = mjSTACKALLOC(d, 6*ncollide, mjtNum);
-    for (int i=0; i < ncollide; i++) {
-      // aamm is column-major (grouped per-axis rather than per-box for better cache locality)
-      makeAAMM(m, d, aamm + 0*ncollide + i,
-                     aamm + 1*ncollide + i,
-                     aamm + 2*ncollide + i,
-                     aamm + 3*ncollide + i,
-                     aamm + 4*ncollide + i,
-                     aamm + 5*ncollide + i, bfid[i], frame);
-    }
-
-    // call SAP
-    int maxsappair = ncollide*(ncollide-1)/2;
-    mjPacked32* sappair = mjSTACKALLOC(d, maxsappair, mjPacked32);
-    int nsappair = mj_SAP(d, aamm, ncollide, 0, sappair, maxsappair);
-    if (nsappair < 0) {
-      mjERROR("SAP failed");
-    }
-
-    // filter SAP pairs, convert to bodyflex pairs
-    for (int i=0; i < nsappair; i++) {
-      int bf1 = bfid[sappair[i].hi];
-      int bf2 = bfid[sappair[i].lo];
-
-      // body pair: prune based on sleep filter and weld filter
-      if (bf1 < nbody && bf2 < nbody) {
-        int weld1 = m->body_weldid[bf1];
-        int weld2 = m->body_weldid[bf2];
-        int parent_weld1 = m->body_weldid[m->body_parentid[weld1]];
-        int parent_weld2 = m->body_weldid[m->body_parentid[weld2]];
-        int asleep1 = sleep_filter ? d->body_awake[bf1] == mjS_ASLEEP : 0;
-        int asleep2 = sleep_filter ? d->body_awake[bf2] == mjS_ASLEEP : 0;
-        int dofnum1 = m->body_dofnum[weld1];
-        int dofnum2 = m->body_dofnum[weld2];
-        if (filterBodyPair(weld1, parent_weld1, asleep1, dofnum1,
-                           weld2, parent_weld2, asleep2, dofnum2,
-                           dsbl_filterparent)) {
-          continue;
-        }
-      }
-
-      // flex pair: skip if neither side has awake dofs
-      // (smaller id first: a body is cheaper to test than a flex)
-      else if (!hasAwakeDofs(m, d, mjMIN(bf1, bf2), sleep_filter) &&
-               !hasAwakeDofs(m, d, mjMAX(bf1, bf2), sleep_filter)) {
+    // add b1:b2 pairs that are not welded together
+    for (int b2=0; b2 < nbody; b2++) {
+      if (!collidable(m, b2) ||
+          filterBodyPair(m, d, b1, b2, dsbl_filterparent, sleep_filter)) {
         continue;
       }
 
-      // add bodyflex pair if there is room in buffer
-      add_pair(m, bf1, bf2, &npair, bfpair, maxpair);
+      // add pair
+      addPair(m, b1, b2, &npair, bfpair, maxpair);
+    }
+
+    // add body:flex pairs, skip if flex has no dofs (like b1) or is asleep
+    for (int f=0; f < nflex; f++) {
+      if (!flexCollidable(m, f) || !hasAwakeDofs(m, d, nbody+f, sleep_filter)) continue;
+      addPair(m, b1, nbody+f, &npair, bfpair, maxpair);
+    }
+  }
+
+  // allocate collidable non-always-colliding bodyflex ids and active flags
+  int* bfid = mjSTACKALLOC(d, nbodyflex, int);
+  mjtByte* active = mjSTACKALLOC(d, nbodyflex, mjtByte);
+  int ncollide = 0, nactive = 0, nawake = 0, has_mocap = 0, has_asleep = 0;
+  for (int i=1; i < nbodyflex; i++) {
+    if (!collidable(m, i) || (i < nbody && skip_sap[i])) {
+      continue;
+    }
+    int is_awake = hasAwakeDofs(m, d, i, sleep_filter);
+    int is_mocap = (i < nbody && m->body_treeid[i] < 0 && m->body_weldid[i] != 0);
+    if (sleep_filter && i < nbody && d->body_awake[i] == mjS_ASLEEP) {
+      has_asleep = 1;
+    }
+    mjtByte act = (mjtByte)(is_awake || (sleep_filter && is_mocap));
+    bfid[ncollide] = i;
+    active[ncollide] = act;
+    ncollide++;
+    nactive += act;
+    nawake += is_awake;
+    has_mocap |= is_mocap;
+  }
+
+  if (ncollide > 1 && (nawake > 0 || (has_mocap && has_asleep))) {
+    // find center of non-world collidable geoms and flex vertices
+    int cnt = 0;
+    mju_zero3(cen);
+    for (int i=0; i < ngeom; i++) {
+      if (m->geom_bodyid[i] && (has_filter || geomCollidable(m, i))) {
+        mju_addTo3(cen, d->geom_xpos+3*i);
+        cnt++;
+      }
+    }
+    for (int f=0; f < nflex; f++) {
+      if (!flexCollidable(m, f)) {
+        continue;
+      }
+      int vstart = m->flex_vertadr[f];
+      int vend = vstart + m->flex_vertnum[f];
+      for (int v=vstart; v < vend; v++) {
+        if (m->flex_vertbodyid[v]) {
+          mju_addTo3(cen, d->flexvert_xpos+3*v);
+          cnt++;
+        }
+      }
+    }
+
+    if (cnt > 0) {
+      mju_scl3(cen, cen, 1.0/cnt);
+
+      // compute covariance
+      mju_zero(cov, 9);
+      for (int i=0; i < ngeom; i++) {
+        if (m->geom_bodyid[i] && (has_filter || geomCollidable(m, i))) {
+          updateCov(cov, d->geom_xpos+3*i, cen);
+        }
+      }
+      for (int f=0; f < nflex; f++) {
+        if (!flexCollidable(m, f)) {
+          continue;
+        }
+        int vstart = m->flex_vertadr[f];
+        int vend = vstart + m->flex_vertnum[f];
+        for (int v=vstart; v < vend; v++) {
+          if (m->flex_vertbodyid[v]) {
+            updateCov(cov, d->flexvert_xpos+3*v, cen);
+          }
+        }
+      }
+      mju_scl(cov, cov, 1.0/cnt, 9);
+
+      // construct covariance-aligned 3D frame: eigenvectors are columns of eigvec, rows of frame
+      // SAP is exact in any frame, a rough one prunes as well
+      mju_eig3Tol(eigval, eigvec, quat, cov, 1e-3);
+      mji_transpose3(frame, eigvec);
+
+      // allocate and construct AAMMs for collidable only
+      mjtNum* aamm = mjSTACKALLOC(d, 6*ncollide, mjtNum);
+      for (int i=0; i < ncollide; i++) {
+        // aamm is column-major (grouped per-axis rather than per-box for better cache locality)
+        makeAAMM(m, d, aamm + 0*ncollide + i,
+                       aamm + 1*ncollide + i,
+                       aamm + 2*ncollide + i,
+                       aamm + 3*ncollide + i,
+                       aamm + 4*ncollide + i,
+                       aamm + 5*ncollide + i, bfid[i], frame);
+      }
+
+      // call SAP (pass active mask only when passive entries exist)
+      int maxsappair = ncollide*(ncollide-1)/2;
+      mjPacked32* sappair = mjSTACKALLOC(d, maxsappair, mjPacked32);
+      const mjtByte* sap_active = (nactive < ncollide) ? active : NULL;
+      int nsappair = mj_SAP(d, aamm, sap_active, ncollide, 0, sappair, maxsappair);
+      if (nsappair < 0) {
+        mjERROR("SAP failed");
+      }
+      if (nsappair > maxsappair) {
+        mj_warning(d, mjWARN_CONTACTFULL, maxsappair);
+        nsappair = maxsappair;
+      }
+
+      // filter SAP pairs, convert to bodyflex pairs
+      for (int i=0; i < nsappair; i++) {
+        int bf1 = bfid[sappair[i].hi];
+        int bf2 = bfid[sappair[i].lo];
+
+        // body pair: prune based on sleep filter and weld filter
+        if (bf1 < nbody && bf2 < nbody) {
+          if (filterBodyPair(m, d, bf1, bf2, dsbl_filterparent, sleep_filter)) {
+            continue;
+          }
+        }
+
+        // flex pair: skip if neither side has awake dofs
+        // (smaller id first: a body is cheaper to test than a flex)
+        else if (!hasAwakeDofs(m, d, mjMIN(bf1, bf2), sleep_filter) &&
+                 !hasAwakeDofs(m, d, mjMAX(bf1, bf2), sleep_filter)) {
+          continue;
+        }
+
+        // add bodyflex pair if there is room in buffer
+        addPair(m, bf1, bf2, &npair, bfpair, maxpair);
+      }
     }
   }
 
@@ -2186,17 +2248,31 @@ static void collisionTask(const mjModel* m, mjData* d, void* arg, int thread_id,
 }
 
 
-// populate contacts from mjPreContact array; allocate in arena
-static void addPairContacts(const mjModel* m, mjData* d, const mjPreContact* precon, int ncon,
-                            const mjcPair* pair, const int* elem, const int* vert) {
+// populate contacts from mjPreContact array; allocate in arena, return 0 if arena full
+static int addPairContacts(const mjModel* m, mjData* d, const mjPreContact* precon, int ncon,
+                           const mjcPair* pair, const int* elem, const int* vert,
+                           int total_demand) {
   if (!ncon) {
-    return;
+    return 1;
   }
 
-  mjContact* con = (mjContact*) mj_arenaAllocByte(d, sizeof(mjContact) * ncon, _Alignof(mjContact));
+  size_t align = _Alignof(mjContact);
+  mjContact* con = (mjContact*) mj_arenaAllocByte(d, sizeof(mjContact) * ncon, align);
+  int full = 0;
   if (!con) {
-    mj_warning(d, mjWARN_CONTACTFULL, d->ncon);
-    return;
+    mj_warning(d, mjWARN_CONTACTFULL, total_demand);
+    full = 1;
+    size_t padding = (align - (d->parena % align)) % align;
+    size_t avail = d->narena - d->pstack;
+    ncon = (d->parena + padding < avail)
+           ? (int)((avail - d->parena - padding) / sizeof(mjContact)) : 0;
+    if (!ncon) {
+      return 0;
+    }
+    con = (mjContact*) mj_arenaAllocByte(d, sizeof(mjContact) * ncon, align);
+    if (!con) {
+      return 0;
+    }
   }
   d->ncon += ncon;
 
@@ -2274,6 +2350,7 @@ static void addPairContacts(const mjModel* m, mjData* d, const mjPreContact* pre
     mj_setContact(m, d, con + i, condim, margin, solref, solreffriction, solimp, friction,
                   adhesion, spec);
   }
+  return !full;
 }
 
 
@@ -2441,8 +2518,9 @@ static void mj_narrowphase(const mjModel* m, mjData* d, int npair, size_t parena
     mj_freeStack(d);
   }
 
-  // fill in contact data
+  // filter contact groups and compute total unclamped contact demand
   int lastgroup = -1;
+  int total_demand = d->ncon;
   for (int i = 0; i < npair; i++) {
     if (pairbuffer[i].group >= 0) {
       // groups are contiguous and increasing: SHOULD NOT OCCUR
@@ -2452,7 +2530,11 @@ static void mj_narrowphase(const mjModel* m, mjData* d, int npair, size_t parena
       lastgroup = pairbuffer[i].group;
       filterPreContacts(d, &arg, i, pairbuffer[i].group);
     }
+    total_demand += arg.nconbuffer[i];
+  }
 
+  // fill in contact data in strict prefix order
+  for (int i = 0; i < npair; i++) {
     int ncon = arg.nconbuffer[i];
     if (!ncon) {
       continue;
@@ -2464,8 +2546,10 @@ static void mj_narrowphase(const mjModel* m, mjData* d, int npair, size_t parena
     const int* elem = (pairbuffer[i].type == mjCPAIR_GEOM_FLEX &&
                        m->geom_type[pairbuffer[i].geom_flex.g] == mjGEOM_SDF)
                       ? arg.flexbuffer + pairbuffer[i].conpos : NULL;
-    addPairContacts(m, d, arg.conbuffer + pairbuffer[i].conpos, ncon,
-                    pairbuffer + i, elem, vert);
+    if (!addPairContacts(m, d, arg.conbuffer + pairbuffer[i].conpos, ncon,
+                         pairbuffer + i, elem, vert, total_demand)) {
+      break;
+    }
   }
   mj_freeStack(d);
 }
@@ -2512,9 +2596,13 @@ static int mj_collideFlexSAPPairs(const mjModel* m, mjData* d, int f, int group,
   // call SAP; hard limit on number of pairs to avoid out-of-memory
   int maxsappair = mjMIN(nactive*(nactive-1)/2, 1000000);
   mjPacked32* sappair = mjSTACKALLOC(d, maxsappair, mjPacked32);
-  int nsappair = mj_SAP(d, aamm, nactive, axis, sappair, maxsappair);
+  int nsappair = mj_SAP(d, aamm, NULL, nactive, axis, sappair, maxsappair);
   if (nsappair < 0) {
     mjERROR("SAP failed");
+  }
+  if (nsappair > maxsappair) {
+    mj_warning(d, mjWARN_CONTACTFULL, maxsappair);
+    nsappair = maxsappair;
   }
 
   // push SAP pairs
@@ -2543,7 +2631,7 @@ static int mj_collideFlexCellPairs(const mjModel* m, mjData* d, int f, int group
   }
 
   mj_markStack(d);
-  int start_pair = npair;
+  int start_pair = (int)((d->parena - parena) / sizeof(mjcPair));
 
   // compute cell range [lo, hi] once per vertex
   int* vert_lo = mjSTACKALLOC(d, 3*nvert, int);
@@ -2735,7 +2823,8 @@ static int mj_collideFlexCellPairs(const mjModel* m, mjData* d, int f, int group
   }
 
   // sort pairs generated by this flex self-collision
-  int n = npair - start_pair;
+  int end_pair = (int)((d->parena - parena) / sizeof(mjcPair));
+  int n = end_pair - start_pair;
   if (n > 1) {
     mjcPair* buf = mjSTACKALLOC(d, n, mjcPair);
     mjcPair* pairs = (mjcPair*) ((char*) d->arena + parena);

@@ -16,8 +16,11 @@ duplicate—the official MuJoCo Sphinx manual in `../index.rst`:
   `` `.. _sensor-contact:` ``) or `../APIreference/functions.rst` (e.g.,
   `` `.. _mj_step:` ``), grep for the literal `.. _Label:` string to jump to the
   target section.
-- **Online fallback (standalone skill installs)**: If `doc/skills/` is installed
-  outside a MuJoCo checkout, every `doc/<path>.rst` page is published at
+- **Standalone installs (pip package & online fallback)**: The `mujoco` PyPI
+  package (`pip install mujoco`) bundles `doc/**/*.rst` and `doc/skills/` under
+  `mujoco/doc/` (`pathlib.Path(mujoco.__file__).parent / 'doc'`), so relative
+  `../../<path>.rst` links resolve offline there as well. When no local `doc/`
+  tree is present, every `doc/<path>.rst` page is published at
   https://mujoco.readthedocs.io/en/stable/ as `<path>.html` (or `/en/latest/`
   for `main` and unreleased chapters like `studio/`;
   `APIreference/functions.rst` renders inside `APIreference/APIfunctions.html`,
@@ -84,6 +87,7 @@ check the canonical models and samples shipped with MuJoCo:
 | :--- | :--- | :--- | :--- |
 | **`mujoco-python`** | [`python/`](python/SKILL.md) | Python simulation lifecycle & physics | `MjSpec` → `MjModel` → `MjData`, `mj_step`, `mj_forward`, named access, `bind()`, `mujoco.batch` (`Batch`), `mujoco.rollout`, `mujoco.minimize`, `mujoco.sysid`, sensors, `mju_*` math. |
 | **`mujoco-spec-editing`** | [`spec_editing/`](spec_editing/SKILL.md) | Procedural model authoring & tuning | Building bodies, geoms, joints, sub-spec attachments with prefixes, actuators (servos, motors), collision bitmasks (`contype`/`conaffinity`), default classes, baseline `<option>`/solver/contact tuning (`.. _CTuning:`). |
+| **`mujoco-deformables`** | [`deformables/`](deformables/SKILL.md) | Deformable objects (`flexcomp`, `flex`, `skin`) | 1D elastic rods (cables, ropes, coils), 2D cloth draping & thin shells, 3D FEM/tetrahedral soft bodies, elasto-plasticity, reduced-DOF interpolation, rigid-body attachments, `make_flex` / `add_flex`. |
 | **`mujoco-rendering`** | [`rendering/`](rendering/SKILL.md) | Offscreen & PBR rendering | Headless RGB, metric depth maps, segmentation masks (`mujoco.Renderer`), Filament PBR (`mujoco.mjrf`, `mujoco.rendering.filament`), C++ `mjr`/`mjrf` pipelines. |
 | **`mujoco-accelerated`** | [`accelerated/`](accelerated/SKILL.md) | GPU & TPU batch simulation | High-throughput batch rollouts with MJX (`MJX-JAX`, `MJX-Warp`, `jax.vmap`, `jax.lax.scan`), differentiability, CUDA batching with MJWarp (`mujoco_warp`), contact/constraint sizing. |
 | **`mujoco-parity`** | [`parity/`](parity/SKILL.md) | Cross-engine physics parity | Comparing CPU (`float64`) vs MJWarp/MJX (`float32`): stage-by-stage `forward` isolation, stiff actuator & `qM` rounding bounds, contact matching, batched 1-step & `float32` baseline rollouts. |
@@ -93,7 +97,8 @@ check the canonical models and samples shipped with MuJoCo:
 ## How to Use These Skills
 
 - **For AI Coding Agents**: Each skill contains standardized YAML frontmatter
-  with `Use when:` triggers and `Don't use for:` exclusions to assist automated
-  orchestrators in choosing the relevant guide.
+  with `Use when:` / `Use for:` triggers and `Don't use for:` /
+  `Do NOT use for:` exclusions to assist automated orchestrators in choosing
+  the relevant guide.
 - **For Developers**: Skills pair quick-start recipes and common pitfalls with
   targeted pointers into the `doc/*.rst` reference manual.

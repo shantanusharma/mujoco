@@ -18,7 +18,6 @@
 #include <cstdio>
 #include <map>
 #include <memory>
-#include <numbers>
 #include <optional>
 #include <string>
 #include <string_view>
@@ -39,6 +38,7 @@
 #include <mujoco/experimental/usd/mjcPhysics/siteAPI.h>
 #include <mujoco/experimental/usd/mjcPhysics/tendon.h>
 #include <mujoco/experimental/usd/mjcPhysics/tokens.h>
+#include <mujoco/experimental/usd/utils.h>
 #include <mujoco/mujoco.h>
 #include "kinematic_tree.h"
 #include "material_parsing.h"
@@ -86,6 +86,7 @@
 #include <pxr/usd/usdShade/materialBindingAPI.h>
 
 using mujoco::NewtonTokens;
+using mujoco::usd::SetUsdPrimPathUserValue;
 using pxr::MjcPhysicsTokens;
 using pxr::TfToken;
 template <typename T>
@@ -97,8 +98,6 @@ struct UsdCaches {
   pxr::UsdShadeMaterialBindingAPI::CollectionQueryCache collection_query_cache;
   std::map<pxr::SdfPath, mjsMaterial*> parsed_materials;
 };
-
-constexpr const char* kUsdPrimPathKey = "usd_primpath";
 
 std::string GetStageModelName(const pxr::UsdStageRefPtr& stage) {
   pxr::UsdPrim default_prim = stage->GetDefaultPrim();
@@ -123,24 +122,6 @@ std::string GetStageModelName(const pxr::UsdStageRefPtr& stage) {
   }
 
   return "";
-}
-
-void SetUsdPrimPathUserValue(mjsElement* element,
-                             const pxr::SdfPath& prim_path) {
-  // The value is a pointer to a newly allocated SdfPath, which will be deleted
-  // when the mjsElement is deleted.
-  const pxr::SdfPath* usd_primpath = new pxr::SdfPath(prim_path);
-  mjs_setUserValueWithCleanup(
-      element, kUsdPrimPathKey, usd_primpath,
-      [](const void* data) { delete static_cast<const pxr::SdfPath*>(data); });
-}
-
-pxr::SdfPath GetUsdPrimPathUserValue(mjsElement* element) {
-  const void* user_data = mjs_getUserValue(element, kUsdPrimPathKey);
-  if (user_data) {
-    return *static_cast<const pxr::SdfPath*>(user_data);
-  }
-  return pxr::SdfPath();
 }
 
 void SetDoubleArrFromGfVec3d(double* to, const pxr::GfVec3d& from) {
@@ -1063,7 +1044,7 @@ void ParseMjcPhysicsCollisionAPI(
       mju_warning(
           "solref attribute for geom %s has incorrect size %zu, "
           "expected %d.",
-          mjs_getName(geom->element)->c_str(), solref.size(), mjNREF);
+          mjs_getString(mjs_getName(geom->element)), solref.size(), mjNREF);
     }
   }
 
@@ -1079,7 +1060,7 @@ void ParseMjcPhysicsCollisionAPI(
       mju_warning(
           "solimp attribute for geom %s has incorrect size %zu, "
           "expected %d.",
-          mjs_getName(geom->element)->c_str(), solimp.size(), mjNIMP);
+          mjs_getString(mjs_getName(geom->element)), solimp.size(), mjNIMP);
     }
   }
 
@@ -1738,7 +1719,7 @@ void ParseMjcPhysicsJointAPI(mjsJoint* mj_joint,
       mju_warning(
           "springdamper attribute for joint %s has incorrect size %zu, "
           "expected 2.",
-          mjs_getName(mj_joint->element)->c_str(), springdamper.size());
+          mjs_getString(mjs_getName(mj_joint->element)), springdamper.size());
     }
   }
 
@@ -1754,7 +1735,8 @@ void ParseMjcPhysicsJointAPI(mjsJoint* mj_joint,
       mju_warning(
           "solreflimit attribute for joint %s has incorrect size %zu, "
           "expected %d.",
-          mjs_getName(mj_joint->element)->c_str(), solreflimit.size(), mjNREF);
+          mjs_getString(mjs_getName(mj_joint->element)), solreflimit.size(),
+          mjNREF);
     }
   }
 
@@ -1770,7 +1752,8 @@ void ParseMjcPhysicsJointAPI(mjsJoint* mj_joint,
       mju_warning(
           "solimplimit attribute for joint %s has incorrect size %zu, "
           "expected %d.",
-          mjs_getName(mj_joint->element)->c_str(), solimplimit.size(), mjNIMP);
+          mjs_getString(mjs_getName(mj_joint->element)), solimplimit.size(),
+          mjNIMP);
     }
   }
 
@@ -1786,7 +1769,7 @@ void ParseMjcPhysicsJointAPI(mjsJoint* mj_joint,
       mju_warning(
           "solreffriction attribute for joint %s has incorrect size %zu, "
           "expected %d.",
-          mjs_getName(mj_joint->element)->c_str(), solreffriction.size(),
+          mjs_getString(mjs_getName(mj_joint->element)), solreffriction.size(),
           mjNREF);
     }
   }
@@ -1803,7 +1786,7 @@ void ParseMjcPhysicsJointAPI(mjsJoint* mj_joint,
       mju_warning(
           "solimpfriction attribute for joint %s has incorrect size %zu, "
           "expected %d.",
-          mjs_getName(mj_joint->element)->c_str(), solimpfriction.size(),
+          mjs_getString(mjs_getName(mj_joint->element)), solimpfriction.size(),
           mjNIMP);
     }
   }
@@ -1922,9 +1905,8 @@ void ParseMjcPhysicsJointAPI(mjsJoint* mj_joint,
     newton_damping_attr.Get(&damping);
     // Newton angular damping is per degree; MuJoCo damping is per radian,
     // regardless of the compiler's angle setting.
-    mj_joint->damping[0] = mj_joint->type == mjJNT_HINGE
-                               ? damping * 180.0 / std::numbers::pi
-                               : damping;
+    mj_joint->damping[0] =
+        mj_joint->type == mjJNT_HINGE ? damping * 180.0 / mjPI : damping;
   }
 
   if (mjc_frictionloss_authored) {
@@ -2097,7 +2079,8 @@ mjsGeom* ParseUsdGeomGprim(mjSpec* spec, const pxr::UsdPrim& gprim,
       }
     }
     if (material) {
-      mjs_setString(geom->material, mjs_getName(material->element)->c_str());
+      mjs_setString(geom->material,
+                    mjs_getString(mjs_getName(material->element)));
     }
   }
 
@@ -2172,7 +2155,8 @@ void ParseUsdPhysicsCollider(mjSpec* spec,
       }
     }
     if (material) {
-      mjs_setString(geom->material, mjs_getName(material->element)->c_str());
+      mjs_setString(geom->material,
+                    mjs_getString(mjs_getName(material->element)));
     }
   }
 
@@ -2298,9 +2282,8 @@ void ParseConstraint(mjSpec* spec, const pxr::UsdPrim& prim, mjsBody* body,
       newton_coef0.Get(&val);
       // USD revolute offsets are degrees. MuJoCo equality coefficients use
       // radians regardless of compiler.angle; legacy MJC values already do.
-      eq->data[0] = prim.IsA<pxr::UsdPhysicsRevoluteJoint>()
-                        ? val * std::numbers::pi / 180.0
-                        : val;
+      eq->data[0] =
+          prim.IsA<pxr::UsdPhysicsRevoluteJoint>() ? val * mjPI / 180.0 : val;
     }
     if (mjc_coef1 && mjc_coef1.HasAuthoredValue()) {
       mjc_coef1.Get(&eq->data[1]);
@@ -2574,8 +2557,8 @@ void ParseUsdPhysicsJoint(mjSpec* spec, const pxr::UsdPrim& prim, mjsBody* body,
         mj_joint->range[0] = lower;
         mj_joint->range[1] = upper;
       } else {
-        mj_joint->range[0] = lower * std::numbers::pi / 180.0;
-        mj_joint->range[1] = upper * std::numbers::pi / 180.0;
+        mj_joint->range[0] = lower * mjPI / 180.0;
+        mj_joint->range[1] = upper * mjPI / 180.0;
       }
     }
   } else if (prim.IsA<pxr::UsdPhysicsPrismaticJoint>()) {
@@ -2665,9 +2648,8 @@ void ParseMjcPhysicsKeyframe(mjSpec* spec,
   auto mpos_attr = keyframe.GetMjcMposAttr();
   auto mquat_attr = keyframe.GetMjcMquatAttr();
 
-  auto setKeyframeData = [](mjsKey* key, const pxr::UsdAttribute& attr,
-                            std::vector<double>** key_data,
-                            double* time = nullptr) {
+  auto setKeyframeData = [](const pxr::UsdAttribute& attr,
+                            mjDoubleVec* key_data, double* time = nullptr) {
     if (attr.HasAuthoredValue()) {
       pxr::VtDoubleArray data;
       if (time == nullptr) {
@@ -2675,7 +2657,7 @@ void ParseMjcPhysicsKeyframe(mjSpec* spec,
       } else {
         attr.Get(&data, *time);
       }
-      *key_data = new std::vector<double>(data.begin(), data.end());
+      mjs_setDouble(key_data, data.cdata(), static_cast<int>(data.size()));
     }
   };
 
@@ -2691,12 +2673,12 @@ void ParseMjcPhysicsKeyframe(mjSpec* spec,
     SetUsdPrimPathUserValue(key->element, prim.GetPath());
 
     mjs_setName(key->element, prim.GetName().GetString().c_str());
-    setKeyframeData(key, qpos_attr, &key->qpos);
-    setKeyframeData(key, qvel_attr, &key->qvel);
-    setKeyframeData(key, act_attr, &key->act);
-    setKeyframeData(key, ctrl_attr, &key->ctrl);
-    setKeyframeData(key, mpos_attr, &key->mpos);
-    setKeyframeData(key, mquat_attr, &key->mquat);
+    setKeyframeData(qpos_attr, key->qpos);
+    setKeyframeData(qvel_attr, key->qvel);
+    setKeyframeData(act_attr, key->act);
+    setKeyframeData(ctrl_attr, key->ctrl);
+    setKeyframeData(mpos_attr, key->mpos);
+    setKeyframeData(mquat_attr, key->mquat);
   } else {
     // If time samples, we create a keyframe for each time sample.
     std::vector<double> times;
@@ -2711,12 +2693,12 @@ void ParseMjcPhysicsKeyframe(mjSpec* spec,
           prim.GetName().GetString() + "_" + std::to_string(keyframe_id++);
       mjs_setName(key->element, key_name.c_str());
       key->time = time;
-      setKeyframeData(key, qpos_attr, &key->qpos, &time);
-      setKeyframeData(key, qvel_attr, &key->qvel, &time);
-      setKeyframeData(key, act_attr, &key->act, &time);
-      setKeyframeData(key, ctrl_attr, &key->ctrl, &time);
-      setKeyframeData(key, mpos_attr, &key->mpos, &time);
-      setKeyframeData(key, mquat_attr, &key->mquat, &time);
+      setKeyframeData(qpos_attr, key->qpos, &time);
+      setKeyframeData(qvel_attr, key->qvel, &time);
+      setKeyframeData(act_attr, key->act, &time);
+      setKeyframeData(ctrl_attr, key->ctrl, &time);
+      setKeyframeData(mpos_attr, key->mpos, &time);
+      setKeyframeData(mquat_attr, key->mquat, &time);
     }
   }
 }
@@ -2765,12 +2747,7 @@ mjsBody* ParseUsdPhysicsRigidbody(
     ParseNewtonArticulationRootAPI(spec, prim);
   }
 
-  // The value is a pointer to a newly allocated SdfPath, which will be deleted
-  // when the mjsElement is deleted.
-  const pxr::SdfPath* usd_primpath = new pxr::SdfPath(prim.GetPath());
-  mjs_setUserValueWithCleanup(
-      body->element, kUsdPrimPathKey, usd_primpath,
-      [](const void* data) { delete static_cast<const pxr::SdfPath*>(data); });
+  SetUsdPrimPathUserValue(body->element, prim.GetPath());
 
   if (prim.HasAPI<pxr::UsdPhysicsFilteredPairsAPI>()) {
     ParseUsdFilteredPairsAPI(spec, prim);
@@ -2983,8 +2960,12 @@ mjSpec* Decode(mjResource* resource, const mjVFS* vfs, char* error,
 
 int CanDecode(const mjResource* resource) {
   std::string_view name(resource->name);
-  return name.ends_with(".usd") || name.ends_with(".usda") ||
-         name.ends_with(".usdc") || name.ends_with(".usdz");
+  auto ends_with = [name](std::string_view suffix) {
+    return name.size() >= suffix.size() &&
+           name.substr(name.size() - suffix.size()) == suffix;
+  };
+  return ends_with(".usd") || ends_with(".usda") || ends_with(".usdc") ||
+         ends_with(".usdz");
 }
 }  // namespace
 

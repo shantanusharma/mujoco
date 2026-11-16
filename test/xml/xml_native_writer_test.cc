@@ -1850,6 +1850,46 @@ TEST_F(XMLWriterTest, WritesHfield) {
   }
 }
 
+TEST_F(XMLWriterTest, WritesHfieldRejectsDimensionOverflow) {
+  mjSpec* spec = mj_makeSpec();
+  spec->compiler.savecompiled = 0;
+  mjsHField* hf = mjs_addHField(spec);
+  mjs_setName(hf->element, "hf");
+  hf->nrow = 1073741825;  // 1073741825 * 4 wraps to 4 in 32-bit int
+  hf->ncol = 4;
+  hf->size[0] = hf->size[1] = hf->size[2] = hf->size[3] = 1.0;
+  const float elevation[4] = {0.0f, 1.0f, 2.0f, 3.0f};
+  mjs_setFloat(hf->userdata, elevation, 4);
+
+  std::array<char, 1024> xml_buf;
+  std::array<char, 1024> error;
+  EXPECT_EQ(mj_saveXMLString(spec, xml_buf.data(), xml_buf.size(), error.data(),
+                             error.size()),
+            -1);
+  EXPECT_THAT(error.data(), HasSubstr("invalid hfield dimensions"));
+  mj_deleteSpec(spec);
+}
+
+TEST_F(XMLWriterTest, WritesHfieldRejectsMismatchedElevation) {
+  mjSpec* spec = mj_makeSpec();
+  spec->compiler.savecompiled = 0;
+  mjsHField* hf = mjs_addHField(spec);
+  mjs_setName(hf->element, "hf");
+  hf->nrow = 4;
+  hf->ncol = 4;
+  hf->size[0] = hf->size[1] = hf->size[2] = hf->size[3] = 1.0;
+  const float elevation[2] = {0.0f, 1.0f};
+  mjs_setFloat(hf->userdata, elevation, 2);
+
+  std::array<char, 1024> xml_buf;
+  std::array<char, 1024> error;
+  EXPECT_EQ(mj_saveXMLString(spec, xml_buf.data(), xml_buf.size(), error.data(),
+                             error.size()),
+            -1);
+  EXPECT_THAT(error.data(), HasSubstr("elevation data length must match"));
+  mj_deleteSpec(spec);
+}
+
 TEST_F(XMLWriterTest, WritesLight) {
   static constexpr char xml[] = R"(
   <mujoco>
@@ -4557,6 +4597,58 @@ TEST_F(XMLWriterTest, BodyToFrameGeomlessBodyPreservesInertial) {
 
   mj_deleteModel(model);
   mj_deleteSpec(spec);
+}
+
+TEST_F(XMLWriterTest, HeadlightActiveRoundTrip) {
+  struct Case {
+    const char* input;
+    const char* saved_keyword;
+    int expected;
+  };
+  const Case cases[] = {
+      {"false", "false", 0}, {"true", "true", 1}, {"auto", "auto", 2},
+      {"0", "false", 0},     {"1", "true", 1},    {"2", "auto", 2},
+  };
+  std::array<char, 1024> error;
+  for (const Case& c : cases) {
+    std::string xml = std::string("<mujoco><visual><headlight active=\"") +
+                      c.input + "\"/></visual></mujoco>";
+    mjSpec* spec =
+        mj_parseXMLString(xml.c_str(), nullptr, error.data(), error.size());
+    ASSERT_THAT(spec, NotNull()) << c.input << ": " << error.data();
+    mjModel* model = mj_compile(spec, nullptr);
+    ASSERT_THAT(model, NotNull()) << c.input << ": " << mjs_getError(spec);
+
+    // authored save always emits the canonical keyword when authored
+    spec->compiler.savecompiled = 0;
+    std::string saved_authored = SaveToString(spec);
+    EXPECT_THAT(saved_authored,
+                HasSubstr(std::string("active=\"") + c.saved_keyword + "\""))
+        << c.input;
+    MjModelPtr reloaded_authored =
+        LoadModelFromString(saved_authored.c_str(), error.data(), error.size());
+    ASSERT_THAT(reloaded_authored.get(), NotNull())
+        << c.input << ": " << error.data();
+    EXPECT_EQ(reloaded_authored->vis.headlight.active, c.expected) << c.input;
+
+    // compiled save omits the default ("auto" / 2) and emits "false" / "true"
+    std::string saved_compiled = SaveAndReadXml(model);
+    if (c.expected == 2) {
+      EXPECT_THAT(saved_compiled, Not(HasSubstr("active="))) << c.input;
+    } else {
+      EXPECT_THAT(saved_compiled,
+                  HasSubstr(std::string("active=\"") + c.saved_keyword + "\""))
+          << c.input;
+    }
+    MjModelPtr reloaded_compiled =
+        LoadModelFromString(saved_compiled.c_str(), error.data(), error.size());
+    ASSERT_THAT(reloaded_compiled.get(), NotNull())
+        << c.input << ": " << error.data();
+    EXPECT_EQ(reloaded_compiled->vis.headlight.active, c.expected) << c.input;
+
+    mj_deleteModel(model);
+    mj_deleteSpec(spec);
+  }
 }
 
 }  // namespace

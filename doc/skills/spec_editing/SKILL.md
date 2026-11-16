@@ -1,15 +1,20 @@
 ---
 name: mujoco-spec-editing
 description: >-
-  Procedural model authoring, editing, and tuning with MjSpec (Python and C++),
+  MuJoCo procedural model authoring, editing, and tuning with MjSpec
+  (`mujoco.MjSpec` in Python and `mjSpec` in C++):
   bodies, geoms, joints, sites, cameras, sub-model attachment with prefix
   namespaces, actuators (position servos, motors, velocity drives, trntype),
   baseline option/default overrides (implicitfast, elliptic cones, solref,
   solimp, armature, damping), collision bitmasks (contype, conaffinity),
   friction (condim), default classes (MjsDefault), procedural meshes, deletion,
-  spec recompilation (spec.recompile). Use for authoring or tuning MJCF/MjSpec
+  spec recompilation (spec.recompile). Use only for authoring or tuning MuJoCo
+  MJCF/MjSpec
   models, adding bodies/geoms/actuators, and attaching sub-models.
-  Do NOT use for stepping simulations (mujoco-python) or rendering (mujoco-rendering).
+  Don't use for designing custom non-MuJoCo XML/scene-graph APIs when MuJoCo
+  `MjSpec` is not used, deformable flex/cloth/cable modeling
+  (mujoco-deformables), stepping simulations (mujoco-python), or rendering
+  (mujoco-rendering).
 ---
 
 # MuJoCo Spec Editing: Building & Modifying Models
@@ -25,7 +30,9 @@ description: >-
 > [`../../XMLreference.rst`](../../XMLreference.rst),
 > [`../../python.rst`](../../python.rst) (`.. _PyModelEdit:`), and
 > [`../../APIreference/functions.rst`](../../APIreference/functions.rst), grep
-> the literal `.. _Label:` anchor. Outside a checkout, fetch
+> the literal `.. _Label:` anchor. Outside a checkout, the same `doc/*.rst` tree
+> ships offline in `pip install mujoco` at
+> `pathlib.Path(mujoco.__file__).parent / 'doc'`; otherwise fetch
 > `https://mujoco.readthedocs.io/en/latest/<path>.html` (or `/en/stable/` for
 > released pages; `functions.rst` renders inside
 > `APIreference/APIfunctions.html`, and Sphinx anchors lowercase the label,
@@ -34,6 +41,9 @@ description: >-
 >
 > **Related skills:**
 >
+> -   [mujoco-deformables](../deformables/SKILL.md) — Deformable `<flexcomp>`,
+>     `<flex>`, and `<skin>` modeling (1D rods, 2D cloth/shells, 3D FEM soft
+>     bodies, and attachments).
 > -   [mujoco-python](../python/SKILL.md) — Simulation lifecycle, stepping, and
 >     diagnostics.
 > -   [mujoco-rendering](../rendering/SKILL.md) — Offscreen image rendering and
@@ -378,17 +388,10 @@ spec.add_sensor(name='torso_gyro', type=mujoco.mjtSensor.mjSENS_GYRO,
     mass/Hessian arrowhead in $O(N)$ with zero fill-in rather than $O(N^3)$.
     Static geoms on `worldbody` have 0 DOFs and are unaffected — see the full
     derivation in [modeling.rst](../../modeling.rst) (`.. _CBodyOrdering:`).
-5.  **Never add `<freejoint/>` (or joints) to the parent body of an unpinned
-    `<flexcomp>`**:
-    For `<flexcomp>` with `dof="full"`, `"trilinear"`, or `"quadratic"`
-    and `rigid="false"`, unpinned vertices/nodes already carry 3 orthogonal
-    slide joints providing full 3D motion. Do not add joints or a dummy
-    `<inertial/>` on the parent body unless at least one vertex/node is pinned
-    via `<pin>`, `rigid="true"`, or `dof="radial"` / `"2d"`. Reposition an
-    unpinned `<flexcomp>` via static parent `pos`/`quat` at compile time or
-    slide-joint `qpos` offsets at runtime — see
-    [modeling.rst](../../modeling.rst) (`.. _CDeformable:`) and
-    [XMLreference.rst](../../XMLreference.rst) (`.. _body-flexcomp:`).
+5.  **Never add joints (including `<freejoint/>`) to the parent body of an
+    unpinned `<flexcomp>`** (except `dof="2d"` or `"radial"`). See
+    [mujoco-deformables](../deformables/SKILL.md) for all `<flexcomp>`, `<pin>`,
+    and `<elasticity>` rules.
 
 ## 10. Reference Models & Key References
 
@@ -400,11 +403,12 @@ existing models:
 -   **Built-in showcase models (`../../../model/`, or online at
     https://github.com/google-deepmind/mujoco/tree/main/model)**:
     `model/humanoid/`, `model/tendon_arm/arm26.xml`, `model/car/car.xml`,
-    `model/slider_crank/slider_crank.xml`, `model/flex/` (`bag.xml`,
-    `jelly.xml`, `drape.xml`, `poncho.xml`), `model/replicate/`
-    (`newton_cradle.xml`, `particle.xml`, `bunnies.xml`), `model/plugin/`
-    (cable, elasticity, actuator, SDF), `model/tactile/`, `model/adhesion/`,
-    `model/sleep/`, and `model/speculative/`.
+    `model/slider_crank/slider_crank.xml`, `model/flex/` (cables, cloth, soft
+    bodies — see [mujoco-deformables](../deformables/SKILL.md)),
+    `model/replicate/` (`newton_cradle.xml`, `particle.xml`, `bunnies.xml`),
+    `model/plugin/` (actuator, sensor, SDF), `model/tactile/`,
+    `model/adhesion/`, `model/sleep/`, `model/speculative/`, and
+    `model/plastic/`.
 -   **MuJoCo Menagerie ([models.rst](../../models.rst), `.. _Menagerie:`)**:
     Production robot descriptions (Franka Panda/FR3, UR5e/UR10e, Unitree
     G1/H1/Go2, Spot, Barkour, Shadow Hand, Robotiq 2F-85, ALOHA 2, Skydio X2,

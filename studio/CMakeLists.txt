@@ -28,8 +28,6 @@ add_library(${MUJOCO_STUDIO_PLATFORM_TARGET_NAME} STATIC)
 
 target_sources(${MUJOCO_STUDIO_PLATFORM_TARGET_NAME}
     PRIVATE
-        hal/filament_renderer.cc
-        hal/filament_renderer.h
         hal/graphics_mode.cc
         hal/graphics_mode.h
         hal/window.cc
@@ -46,6 +44,8 @@ target_sources(${MUJOCO_STUDIO_PLATFORM_TARGET_NAME}
         sim/sim_profiler.h
         sim/step_control.cc
         sim/step_control.h
+        ux/camera_control.cc
+        ux/camera_control.h
         ux/console.cc
         ux/console.h
         ux/enum_utils.h
@@ -68,6 +68,8 @@ target_sources(${MUJOCO_STUDIO_PLATFORM_TARGET_NAME}
         ux/plugin.h
         ux/spec_editor.cc
         ux/spec_editor.h
+        ux/theme.cc
+        ux/theme.h
         ux/well_tempered.h
 )
 
